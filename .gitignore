@@ -1,0 +1,16 @@
+# Local inputs, generated output, and credentials
+.DS_Store
+Thumbs.db
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.env
+.env.*
+!.env.example
+credentials*.json
+*.pem
+GPP_Project/
+data/
+outputs/
+node_modules/

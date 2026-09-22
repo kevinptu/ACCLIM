@@ -1,0 +1,594 @@
+---
+title: "gpp"
+author: "Gabriella Dauber"
+date: "1/31/2025"
+model: "Assimilation Capacity Coordinates with Light Interception, Mean Assimilation and Transpiration Efficiency (ACCLIMATE), developed by Kevin Tu"
+timestep: "Daily"
+output: html_document
+---
+
+```{r acclim}
+
+
+# Checks
+# 1 - Check to make sure that the input data looks reasonable. For example, the PAR data looks too high for some years so using SWR instead looks more robust.
+
+#Inputs: Latitude, Year, JD, DayNum (count), Tnight (deg C), Tdaily (deg C), SWRdaily (W/m2), NDVI, EVI2, VPDdaily (kPa), ca_daily (umol/mol), Pdaily (Pa), Rndaily (W/m2), LEdaily (W/m2)
+#Observations: Daily GPP (gC/m2d; average rate over 24-hrs)
+
+#Constants: 
+tc = 7 # time constant for acclimation (days)
+GPPmean2GPPmax = 0.6 # ratio of mean GPP to the maximum GPP asymptote (dimensionless)
+Oi = 20900 # leaf internal oxygen partial pressure (Pa)
+QRC3 = 12 # quantum requirement for C3 plants (mol photons / mol CO2)
+QRC4 = 16.67 # quantum requirement for C4 plants (mol photons / mol CO2)
+EVI2min = 0.15 # minimum EVI of bare ground (dimensionless)
+EVI2max = 0.80 # maximum EVI of a full green canopy (dimensionless)
+fresp = 0.1 # leaf respiration as a fraction of gross photosynthetic capacity (dimensionless)
+
+# Import FLUXNET dataset
+library(readr)
+data <- read_csv("GPP_Project/FLX_US-Ha1_FLUXNET2015_FULLSET_DD_1991-2012_1-4.csv")
+
+##Calculations
+
+# Initialize all necessary columns with NA
+data$dl <- NA
+data$Tmin <- NA
+data$Tmax <- NA
+data$Tday <- NA
+data$ea <- NA
+data$esTmin <- NA
+data$esTmax <- NA
+data$esTday <- NA
+data$VPDmax <- NA
+data$VPDday <- NA
+data$PARday <- NA
+data$dt <- NA
+data$w <- NA
+data$Pmean <- NA
+data$ca_mean <- NA
+data$Tday_mean <- NA
+data$Tmax_mean <- NA
+data$esTmax_mean <- NA
+data$VPDday_mean <- NA
+data$VPDmax_mean <- NA
+data$PARday_mean <- NA
+data$fcold_mean <- NA
+data$tau_mean <- NA
+data$gamma_star_mean <- NA
+data$cicaC3_mean <- NA
+data$cicaC4_mean <- NA
+data$piC3_mean <- NA
+data$piC4_mean <- NA
+data$QYC3_mean <- NA
+data$QYC4_mean <- NA
+data$FAPAR <- NA
+data$GPPmax_C3 <- NA
+data$GPPmax_C4 <- NA
+data$GPPday_mean_C3 <- NA
+data$GPPday_mean_C4 <- NA
+data$C4frac <- NA
+data$PredGPPmean <- NA
+data$EddyGPPday <- NA
+data$EddyGPPday_mean <- NA
+data$Rnday <- NA
+data$Rnday_mean <- NA
+data$s_mean <- NA
+data$s_ratio_mean <- NA
+data$PT_mean <- NA
+data$RHmin <- NA
+data$RHmin_mean <- NA
+data$fwet_mean <- NA
+data$fSM_mean <- NA
+data$PredLEiday_mean <- NA
+data$PredLEsday_mean <- NA
+data$PredLEcday_mean <- NA
+data$PredLEday_mean <- NA
+data$EddyLEday_mean <- NA
+
+# Assign latitude column
+data$Latitude <- 42.5378	
+
+# Renaming input columns for FLUXNET2015 data
+names(data)[which(names(data) == "TA_F_NIGHT")] <- "Tnight"   # Nighttime air temperature
+names(data)[which(names(data) == "TA_F")] <- "Tdaily"         # Daily air temperature
+names(data)[which(names(data) == "VPD_F")] <- "VPDdaily"      # Daily vapor pressure deficit
+names(data)[which(names(data) == "PPFD_IN")] <- "PARdaily"    # Daily photosynthetic active radiation
+names(data)[which(names(data) == "GPP_F_MDS")] <- "GPPdaily"  # Daily gross primary productivity
+names(data)[which(names(data) == "SW_IN_F")] <- "SWRdaily"    # Daily shortwave radiation
+names(data)[which(names(data) == "PA_F")] <- "Pdaily"         # Daily air pressure
+names(data)[which(names(data) == "CO2_F_MDS")] <- "ca_daily"  # Daily CO2 concentration
+names(data)[which(names(data) == "NETRAD")] <- "Rndaily"      # Daily net radiation
+names(data)[which(names(data) == "LE_F_MDS")] <- "LEdaily"    # Daily latent energy flux
+                    
+# Daily precipitation accumulation (mm); never substitute zero for missing rain.
+if (!'P_F' %in% names(data)) stop('FLUXNET P_F precipitation is required (mm/day).')
+data$precip <- data$P_F
+data$precip[data$precip < 0] <- NA_real_
+data$period_days <- 1
+
+# Ensure unit consistency 
+# FLUXNET2015 missing-value sentinel; retain missing values explicitly.
+data[] <- lapply(data, function(v) { if (is.numeric(v)) v[v == -9999] <- NA_real_; v })
+data$VPDdaily <- data$VPDdaily / 10 # Convert hPa to kPa
+data$Pdaily <- data$Pdaily * 1000 # FLUXNET PA_F is kPa; model uses Pa
+
+# Extract Year and Julian Day (JD) from TIMESTAMP
+data$Year <- as.integer(substr(data$TIMESTAMP, 1, 4))
+data$JD <- as.integer(format(as.Date(as.character(data$TIMESTAMP), "%Y%m%d"), "%j"))
+
+data$date <- as.Date(as.character(data$TIMESTAMP), '%Y%m%d')
+if (anyNA(data$date) || anyDuplicated(data$date) || is.unsorted(data$date))
+  stop('Input dates must be valid, unique, and increasing.')
+# Precompute instantaneous inputs before initializing running means from rows 1:5.
+# NDVI/EVI2 must already be joined to this FLUXNET table by the input workflow.
+required_forcing <- c('Tnight', 'Tdaily', 'SWRdaily', 'Rndaily', 'Pdaily', 'ca_daily', 'EVI2')
+if (!all(required_forcing %in% names(data))) stop('Missing meteorology or joined EVI2 forcing.')
+if (any(!is.finite(as.matrix(data[required_forcing]))))
+  stop('Fill or resolve missing model forcings before running ACCLIM; do not bridge bucket gaps.')
+solar_delta <- 0.4093 * sin(2*pi*(data$JD - 81)/365)
+data$dl <- pmax(0.5, pmin(23.5, 24/pi * acos(pmax(-1, pmin(1,
+  -tan(data$Latitude*pi/180) * tan(solar_delta))))))
+data$Tmin <- 2*data$Tnight - data$Tdaily
+data$Tmax <- 2*data$Tdaily - data$Tmin
+data$Tday <- (data$Tmax + data$Tdaily)/2
+data$esTmin <- 0.61121*exp(17.502*data$Tmin/(data$Tmin+240.97))
+data$esTmax <- 0.61121*exp(17.502*data$Tmax/(data$Tmax+240.97))
+data$VPDmax <- data$esTmax-data$esTmin
+data$esTday <- 0.61121*exp(17.502*data$Tday/(data$Tday+240.97))
+data$VPDday <- data$esTday-data$esTmin
+data$PARday <- 2.2*data$SWRdaily*24/data$dl
+data$Rnday <- data$Rndaily*24/data$dl
+data$RHmin <- pmin(1, pmax(0, data$esTmin/data$esTmax))
+initial_rows <- seq_len(min(5, nrow(data)))
+
+# View data
+View(data)
+colnames(data)
+
+# Loop for calculating
+for (i in 1:(nrow(data))) {
+
+
+# Daylength, dl (hours)
+	# dl was precomputed from latitude and day of year above.
+
+# Minimum daily air temperature, Tmin (deg C)
+	data$Tmin[i] <- 2 * data$Tnight[i] - data$Tdaily[i]
+
+# Maximum daily air temperature, Tmax (deg C)
+	data$Tmax[i] <- 2 * data$Tdaily[i] - data$Tmin[i]
+
+# Mean daytime temperature, Tday (degC)
+	data$Tday[i] <- (data$Tmax[i] + 0.5 * (data$Tmax[i] + data$Tmin[i])) / 2 
+
+# Daily water vapor pressure, ea (kPa)
+	# data$ea[i] <- (0.61121 * exp(17.502 * data$Tdaily[i] / (data$Tdaily[i] + 240.97))) - data$VPDdaily[i] # use when ea is available
+	data$esTmin[i] <- 0.61121 * exp(17.502 * data$Tmin[i] / (data$Tmin[i] + 240.97)) # use when ea is not available
+
+# Daily maximum saturation water vapor pressure, esTmax (kPa)
+	data$esTmax[i] <- 0.61121 * exp(17.502 * data$Tmax[i] / (data$Tmax[i] + 240.97))
+
+# Daytime saturation water vapor pressure, esTday (kPa)
+	data$esTday[i] <- 0.61121 * exp(17.502 * data$Tday[i] / (data$Tday[i] + 240.97))
+
+# Maximum daily saturation water vapor pressure deficit, VPDmax (kPa)
+	# data$VPDmax[i] <- (data$esTmax[i]) - (data$ea[i]) # use when ea is available
+	data$VPDmax[i] <- (data$esTmax[i]) - (data$esTmin[i]) # use when ea is not available
+
+# Daytime saturation water vapor pressure deficit, VPDday (kPa)
+	# data$VPDday[i] <- (data$esTday[i]) - (data$ea[i]) # use when ea is available
+	data$VPDday[i] <- (data$esTday[i]) - (data$esTmin[i]) # use when ea is not available
+
+# Daytime photosynthetically active radiation, PARday (umol/m2s)
+	data$PARday[i] <- (2.2 * data$SWRdaily[i]) * (24 / data$dl[i])
+
+# Time difference between current and previous valid data, dt (days)
+	if (i == 1) {data$dt[i] <- 1} 
+	else {if (data$PARday[i] < 10) {data$dt[i] <- data$dt[i-1]} 
+		else {data$dt[i] <- as.numeric(data$date[i] - data$date[i-1])}}
+
+# Weighting coefficient for running mean calculations, w (-)
+	data$w[i] <- exp(-data$dt[i] / tc)
+
+# Running mean of daytime air pressure, Pmean (Pa)
+	if (i == 1) {data$Pmean[i] <- mean(data$Pdaily[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$Pmean[i] <- data$Pmean[i-1]} 
+		else {data$Pmean[i] <- data$w[i] * data$Pmean[i-1] + (1 - data$w[i]) * data$Pdaily[i]}}
+
+# Running mean of daily CO2 concentration, ca_mean (umol CO2/mol air)
+	if (i == 1) {data$ca_mean[i] <- mean(data$ca_daily[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$ca_mean[i] <- data$ca_mean[i-1]} 
+		else {data$ca_mean[i] <- data$w[i] * data$ca_mean[i-1] + (1 - data$w[i]) * data$ca_daily[i]}}	  
+	  
+# Running mean of daytime air temperature, Tday_mean (deg C)
+	if (i == 1) {data$Tday_mean[i] <- mean(data$Tday[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$Tday_mean[i] <- data$Tday_mean[i-1]} 
+		else {data$Tday_mean[i] <- data$w[i] * data$Tday_mean[i-1] + (1 - data$w[i]) * data$Tday[i]}}
+	  
+# Running mean of maximum daily air temperature, Tmax_mean (deg C)
+	if (i == 1) {data$Tmax_mean[i] <- mean(data$Tmax[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$Tmax_mean[i] <- data$Tmax_mean[i-1]} 
+		else {data$Tmax_mean[i] <- data$w[i] * data$Tmax_mean[i-1] + (1 - data$w[i]) * data$Tmax[i]}}
+
+# Running mean of daytime VPD, VPDday_mean (kPa)
+	if (i == 1) {data$VPDday_mean[i] <- mean(data$VPDday[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$VPDday_mean[i] <- data$VPDday_mean[i-1]}
+		else {data$VPDday_mean[i] <- data$w[i] * data$VPDday_mean[i-1] + (1 - data$w[i]) * data$VPDday[i]}}
+
+# Running mean of daily maximum VPD, VPDmax_mean (kPa)
+	if (i == 1) {data$VPDmax_mean[i] <- mean(data$VPDmax[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$VPDmax_mean[i] <- data$VPDmax_mean[i-1]}
+		else {data$VPDmax_mean[i] <- data$w[i] * data$VPDmax_mean[i-1] + (1 - data$w[i]) * data$VPDmax[i]}}
+
+# Running mean daytime PAR, PARday_mean (umol/m2s)
+	if (i == 1) {data$PARday_mean[i] <- mean(data$PARday[initial_rows])} 
+	else {if (data$PARday[i] < 10) {data$PARday_mean[i] <- data$PARday_mean[i - 1]}
+		else {data$PARday_mean[i] <- data$w[i] * data$PARday_mean[i - 1] + (1 - data$w[i]) * data$PARday[i]}}
+
+# Cold temperature constraint when PAR is absorbed but not used for photosynthesis, fcold_mean (dimensionless)
+	data$fcold_mean[i] <- 1 / ( 1 + exp(0.3 * (5 - data$Tday_mean[i])) )
+
+# CO2/O2 specificity of Rubisco, tau_mean (dimensionless)
+	data$tau_mean[i] <- 2600 * 0.57^( (data$Tday_mean[i] - 25) / 10 )
+
+# Photocompensation point, chloroplast CO2 concentration at which photosynthesis equals photorespiration, gamma_star_mean (Pa) 
+	data$gamma_star_mean[i] <- Oi / ( 2 * data$tau_mean[i] )
+
+# Daytime net radiation, Rnday (W/m2)
+	data$Rnday[i] <- data$Rndaily[i] * (24 / data$dl[i])
+
+# Running mean of daytime Rn, Rnday_mean (W/m2)
+	if (i == 1) {data$Rnday_mean[i] <- mean(data$Rnday[initial_rows])} 
+	else {if (data$Rnday[i] < 10) {data$Rnday_mean[i] <- data$Rnday_mean[i - 1]}
+		else {data$Rnday_mean[i] <- data$w[i] * data$Rnday_mean[i - 1] + (1 - data$w[i]) * data$Rnday[i]}}
+
+# Running mean saturation vapor pressure (required for s_mean).
+  if (i == 1) { data$esTmax_mean[i] <- mean(data$esTmax[initial_rows]) }
+  else if (data$PARday[i] < 10) { data$esTmax_mean[i] <- data$esTmax_mean[i-1] }
+  else { data$esTmax_mean[i] <- data$w[i]*data$esTmax_mean[i-1] + (1-data$w[i])*data$esTmax[i] }
+
+# Mean slope of the saturation vapor pressure-temperature curve, s_mean
+	data$s_mean[i] <- 17.502 * 240.97 * data$esTmax_mean[i] / ((data$Tmax_mean[i] + 240.97)^2)
+
+# Mean C3 ratio of leaf internal (ci) to atmospheric (ca) CO2 concentration, cicaC3_mean (dimensionless)
+	data$zC3[i] = ((1.5*GPPmean2GPPmax*2500*18)/(QRC3*1.26*(1+fresp)))*((data$s_mean[i]+0.066)*data$VPDday_mean[i]*data$PARday_mean[i]*1000)/(data$s_mean[i]*data$Rnday_mean[i]*data$Pmean[i])
+  # Quadratic solves ci in ppm; convert Gamma* from Pa and divide ci by ca.
+  gamma_ppm <- data$gamma_star_mean[i] * 1e6 / data$Pmean[i]
+  data$bC3[i] <- 2*gamma_ppm + data$zC3[i] - data$ca_mean[i]
+  data$cC3[i] <- -gamma_ppm * (data$zC3[i] + 2*data$ca_mean[i])
+  data$cicaC3_mean[i] <- (-data$bC3[i] + sqrt(max(0, data$bC3[i]^2 - 4*data$cC3[i]))) / (2*data$ca_mean[i])
+	
+# Mean C4 ratio of leaf internal (ci) to atmospheric (ca) CO2 concentration, cicaC4_mean (dimensionless)
+	data$cicaC4_mean[i] <- 0.4 
+
+# Mean leaf internal CO2 partial pressure, pi_mean (Pa)
+	data$piC3_mean[i] <- data$cicaC3_mean[i] * data$ca_mean[i] * ( data$Pmean[i] / 1000000 )
+	data$piC4_mean[i] <- data$cicaC4_mean[i] * data$ca_mean[i] * ( data$Pmean[i] / 1000000 )
+
+# Mean quantum yield, QYC3_mean (mol CO2/mol photons)
+	data$QYC3_mean[i] <- data$fcold_mean[i] * (1/QRC3) * ( data$piC3_mean[i] - data$gamma_star_mean[i] ) / ( data$piC3_mean[i] + 2 * data$gamma_star_mean[i] )
+	data$QYC4_mean[i] <- data$fcold_mean[i] * (1/QRC4) 
+	
+# Deferred FAPAR calibration idea (2026-09-16; documentation only).
+# Fit paired, quality-screened observations: NDVI^2 = a + b * EVI2 (b > 0).
+# Derive effective endpoints EVI2min = -a/b and EVI2max = (1-a)/b, then
+# use FAPAR = clamp((EVI2-EVI2min)/(EVI2max-EVI2min), 0, 1).
+# Intent: anchor the scale to NDVI^2 while retaining EVI2 temporal variation
+# and its potential sensitivity to green foliage amid non-green material.
+# These are calibration endpoints, not necessarily observed soil/full-canopy values.
+# If revisited, fit fixed endpoints across multiple years with balanced VI coverage;
+# check slope/endpoints and validate on withheld years against independent data.
+# Fitting to NDVI^2 can inherit its saturation/bias; improvement is not guaranteed.
+# Do not implement yet: the observed performance gain is small and added calibration
+# may introduce bugs. Revisit later; retain the current executable FAPAR calculation.
+# FAPAR (dimensionless), fraction of incident PAR absorbed by chlorophyll or the green photosynthetically active leaf area
+	data$FAPAR[i] <- max(0, min(1, (data$EVI2[i] - EVI2min) / ( EVI2max - EVI2min) )) 
+
+# Maximum gross photosynthesis asymptote, GPPmax (umolCO2/m2s)
+	data$GPPmax_C3[i] = data$QYC3_mean[i] * ( data$FAPAR[i] * data$PARday_mean[i] )
+	data$GPPmax_C4[i] = data$QYC4_mean[i] * ( data$FAPAR[i] * data$PARday_mean[i] )
+
+# Mean daytime gross primary productivity, GPPday_mean (umolsCO2/m2s)
+	data$GPPday_mean_C3[i] = GPPmean2GPPmax * data$GPPmax_C3[i] 
+	data$GPPday_mean_C4[i] = GPPmean2GPPmax * data$GPPmax_C4[i] 
+
+# Mean C4frac (dimensionless), fraction of ground area covered by C4 plants (dimensionless)	
+	data$C4frac[i] = 1 / (1 + exp(-4.04 *(data$GPPmax_C4[i]/data$GPPmax_C3[i]) + 5.99))  
+
+# Mean predicted daytime GPP, PredGPPday_mean (unolCO2/m2s)
+	data$PredGPPmean[i] = (1 - data$C4frac[i]) * data$GPPday_mean_C3[i] + (data$C4frac[i]) * data$GPPday_mean_C4[i]
+
+# Daytime eddy covariance GPP, EddyGPPday (umolCO2/m2s)
+	data$EddyGPPday[i] <- data$GPPdaily[i] * (1000000 / 12) / (data$dl[i] * 60 * 60)
+
+# Mean daytime eddy covariance GPP over the last tc days, EddyGPPday_mean (umolCO2/m2s)
+	if (i < tc) {data$EddyGPPday_mean[i] <- NA}
+	else {data$EddyGPPday_mean[i] <- mean(data$EddyGPPday[(i-tc):i], na.rm = TRUE)}
+
+
+
+
+# Additional equations for transpiration, soil evaporation and interception evaporation
+
+# Mimimum daily relative humidity, RHmin (fraction) 
+	data$RHmin[i] <- min(1, max(0, data$esTmin[i] / data$esTmax[i]))
+	
+# Running mean of minimum relative humidity, RHmin_mean (%)
+	if (i == 1) {data$RHmin_mean[i] <- mean(data$RHmin[initial_rows])}
+	else {if (data$PARday[i] < 10) {data$RHmin_mean[i] <- data$RHmin_mean[i-1]}
+		else {data$RHmin_mean[i] <- data$w[i] * data$RHmin_mean[i-1] + (1 - data$w[i]) * data$RHmin[i]}}
+
+# Mean Ratio s/(s+y), s_ratio_mean (dimensionless)
+	data$s_ratio_mean[i] <- data$s_mean[i] / (data$s_mean[i] + 0.066)
+	
+# Mean relative surface wetness, fwet_mean (dimensionless)
+	data$fwet_mean[i] <- data$RHmin_mean[i]^10
+
+# Mean Priestley-Taylor, PT_mean (W/m^2)
+	data$PT_mean[i] <- 1.26 * data$s_ratio_mean[i] * data$Rnday_mean[i]
+  
+# Mean predicted daytime transpiration, PredLEcday_mean, modeled as PT applied to green leaves
+	data$PredLEcday_mean[i] <- data$PT_mean[i] * data$FAPAR[i] * data$fcold_mean[i] * (1 - data$fwet_mean[i])
+
+# Mean soil moisture constraint, fSM_mean (dimensionless)
+	data$fSM_mean[i] <- data$RHmin_mean[i]^data$VPDmax_mean[i]
+
+# Mean predicted daytime interception evaporation, PredLEiday_mean (W/m2)
+	data$PredLEiday_mean[i] <- data$fwet_mean[i] * data$PT_mean[i] * data$FAPAR[i]
+
+# Mean predicted daytime soil evaporation, PredLEsday_mean (W/m2)
+	data$PredLEsday_mean[i] <- (data$fwet_mean[i] + (1 - data$fwet_mean[i]) * data$fSM_mean[i]) * data$PT_mean[i] * (1 - data$FAPAR[i])
+
+# Mean predicted daytime latent energy flux, PredLEday_mean (W/m2)
+	data$PredLEday_mean[i] = data$PredLEcday_mean[i] + data$PredLEsday_mean[i] + data$PredLEiday_mean[i]
+
+# Daytime eddy covariance LE, EddyLEday (W/m2)
+	data$EddyLEday[i] <- data$LEdaily[i] * (24 / data$dl[i])
+
+# Mean observed daytime latent energy flux, EddyLEday_mean (W/m2)
+	if (i < tc) {data$EddyLEday_mean[i] <- NA}
+	else {data$EddyLEday_mean[i] <- mean(data$EddyLEday[(i-tc):i], na.rm = TRUE)}
+	
+
+
+}
+
+
+# Retrospective effective evaporative storage calibration; inputs are totals in mm
+# for each row's period. The daily FLUXNET driver uses P_F (mm/day accumulated).
+# A monthly driver should pass TerraClimate pr totals and calendar-month lengths.
+# Surface/litter evaporation is external to the bucket; all precipitation enters
+# the bucket. This is an empirical moisture index, not a closed whole-system
+# water balance or a retrieval of volumetric moisture at a known soil depth.
+soil_bucket_period <- function(sm, capacity, precip, potential_mm) {
+  # Exact integration over normalized period u in [0,1]:
+  # dSM/du = precip - (potential_mm/capacity)*SM, capped at capacity.
+  # Uniform within-period precipitation is an assumption, not observed storm timing.
+  q <- potential_mm / capacity
+  surplus <- precip - potential_mm
+  t <- 1
+  if (surplus > 0) {
+    gap_over_surplus <- max(0, capacity-sm) / surplus
+    x <- q * gap_over_surplus
+    log_ratio <- if (x < 1e-5) 1-x/2+x^2/3 else log1p(x)/x
+    t <- min(1, gap_over_surplus * log_ratio)
+  }
+  z <- q*t
+  phi <- if (z < 1e-4) 1-z/2+z^2/6-z^3/24 else -expm1(-z)/z
+  psi <- if (z < 1e-4) 0.5-z/6+z^2/24-z^3/120 else (1-phi)/z
+  mean_sm <- max(0, min(capacity, sm*t*phi + precip*t^2*psi + capacity*(1-t)))
+  fraction <- mean_sm / capacity
+  evaporation <- potential_mm * fraction
+  overflow <- max(0, surplus)*(1-t)
+  end_sm <- max(0, min(capacity, sm+precip-evaporation-overflow))
+  list(mean_sm=mean_sm, fraction=fraction, evaporation=evaporation, overflow=overflow, end_sm=end_sm)
+}
+
+soil_bucket_trajectory <- function(x, capacity) {
+  stopifnot(is.finite(capacity), capacity > 0)
+  sm <- capacity # full initial bucket, no spin-up
+  out <- x
+  out$fSM_RHVPD <- x$fSM_mean
+  out$PredLEsday_RHVPD <- x$PredLEsday_mean
+  out$PredLEday_RHVPD <- x$PredLEday_mean
+  out$SMmax <- capacity
+  sse <- weight <- 0
+  for (i in seq_len(nrow(x))) {
+    conversion <- x$dl[i] * 3600 * x$period_days[i] / 2450000
+    potential <- x$PT_mean[i] * (1 - x$FAPAR[i])
+    surface_le <- x$fwet_mean[i] * potential
+    potential_mm <- (1-x$fwet_mean[i]) * max(0, potential) * conversion
+    period <- soil_bucket_period(sm, capacity, x$precip[i], potential_mm)
+    fraction <- period$fraction
+    soil_mm <- period$evaporation
+    soil_le <- soil_mm / conversion
+    total_le <- surface_le + soil_le
+    out$SM[i] <- sm
+    out$SM_mean[i] <- period$mean_sm
+    out$SM_end[i] <- period$end_sm
+    out$fSM_start[i] <- sm/capacity
+    out$fSM_mean[i] <- fraction
+    out$PredLEs_surface_mean[i] <- surface_le
+    out$PredLEs_soil_mean[i] <- soil_le
+    out$Esoil_period[i] <- soil_mm
+    out$Esurface_period[i] <- surface_le * conversion
+    out$bucket_overflow[i] <- period$overflow
+    out$bucket_water_limited[i] <- potential_mm > 0 && fraction < 1
+    out$PredLEsday_mean[i] <- total_le
+    out$PredLEday_mean[i] <- x$PredLEcday_mean[i] + x$PredLEiday_mean[i] + total_le
+    w <- if (potential > 0) x$period_days[i] else 0
+    sse <- sse + (total_le - x$PredLEsday_mean[i])^2 * w
+    weight <- weight + w
+    sm <- out$SM_end[i]
+  }
+  out$SM_integration <- 'analytic period mean; uniform precipitation within period'
+  list(data = out, mse = sse / max(1, weight), weight = weight)
+}
+
+fit_soil_bucket <- function(x, initial = 100, minimum = 1, maximum = 2000, grid_size = 25) {
+  stopifnot(minimum > 0, maximum > minimum, initial >= minimum,
+            initial <= maximum, grid_size >= 3, grid_size == as.integer(grid_size))
+  required <- c('precip', 'period_days', 'dl', 'fwet_mean', 'PT_mean', 'FAPAR',
+                'fSM_mean', 'PredLEsday_mean', 'PredLEday_mean',
+                'PredLEcday_mean', 'PredLEiday_mean', 'date')
+  if (!all(required %in% names(x))) stop('Missing bucket input columns.')
+  x$fSM_RHVPD <- x$fSM_mean
+  x$PredLEsday_RHVPD <- x$PredLEsday_mean
+  x$PredLEday_RHVPD <- x$PredLEday_mean
+  x$SM_fit_RMSE <- NA_real_
+  x$SM_initial_guess <- initial
+  x$SM_search_min <- minimum
+  x$SM_search_max <- maximum
+  x$SM_initialization <- 'full; no spin-up'
+  x$SM_units <- 'mm effective evaporative storage'
+  x$precip_units <- 'mm/period'
+  numeric_inputs <- setdiff(required, 'date')
+  valid <- nrow(x) > 0 && all(vapply(x[numeric_inputs], function(v) all(is.finite(v)), logical(1))) &&
+    !anyNA(x$date) && all(x$precip >= 0) && all(x$period_days > 0) &&
+    all(x$dl > 0 & x$dl <= 24) && all(x$fwet_mean >= 0 & x$fwet_mean <= 1) &&
+    all(x$FAPAR >= 0 & x$FAPAR <= 1) && all(x$fSM_mean >= 0 & x$fSM_mean <= 1)
+  contiguous <- valid && (nrow(x) == 1 ||
+    all(as.numeric(diff(x$date)) == head(x$period_days, -1)))
+  if (!contiguous || sum(x$period_days) < 365) {
+    x$SM_fit_status <- 'baseline_requires_complete_contiguous_year'
+    warning('Bucket not fitted: requires at least a complete contiguous year of valid inputs; retaining RH/VPD.')
+    return(x)
+  }
+  potential <- x$PT_mean * (1-x$FAPAR)
+  full_soil <- (1-x$fwet_mean) * pmax(0,potential)
+  full_loss <- full_soil * x$dl * 3600 * x$period_days / 2450000
+  if (all(x$precip >= full_loss)) {
+    # All candidates start and remain full; capacity itself is unidentified.
+    x$fSM_mean <- 1
+    x$fSM_start <- 1
+    x$PredLEsday_mean <- x$fwet_mean*potential + full_soil
+    x$PredLEday_mean <- x$PredLEcday_mean + x$PredLEiday_mean + x$PredLEsday_mean
+    x$SM_fit_status <- 'unconstrained_full_bucket'
+    return(x)
+  }
+  score <- function(cap) soil_bucket_trajectory(x, cap)$mse
+  step <- (log(maximum) - log(minimum)) / (grid_size - 1)
+  candidates <- c(initial, exp(seq(log(minimum), log(maximum), length.out = grid_size)))
+  errors <- vapply(candidates, score, numeric(1))
+  best <- candidates[which.min(errors)]
+  best_error <- min(errors)
+  spread <- max(errors[-1]) - min(errors[-1])
+  for (pass in 1:3) {
+    trial <- exp(pmax(log(minimum), pmin(log(maximum), log(best) + (-4:4) * step / 4)))
+    trial_errors <- vapply(trial, score, numeric(1))
+    j <- which.min(trial_errors)
+    if (trial_errors[j] < best_error) { best <- trial[j]; best_error <- trial_errors[j] }
+    step <- step / 4
+  }
+  fitted <- soil_bucket_trajectory(x, best)
+  if (spread <= 1e-8 || fitted$weight == 0) {
+    x$SM_fit_status <- 'baseline_unidentifiable_capacity'
+    warning('Bucket capacity is unidentifiable; retaining RH/VPD.')
+    return(x)
+  }
+  out <- fitted$data
+  out$SM_fit_RMSE <- sqrt(best_error)
+  out$SM_fit_status <- if (best <= minimum * 1.001 || best >= maximum / 1.001)
+    'fitted_at_search_boundary' else 'fitted'
+  out
+}
+
+# ET-effective storage fitted to ORIGINAL full-canopy ET. The isolated proxy
+# uses FAPAR=0 only to reuse the stable bucket integration/calibration machinery.
+# Original FAPAR, GPP, transpiration and near-surface diagnostics are untouched.
+fit_et_bucket <- function(x, initial = 100, minimum = 1, maximum = 2000, grid_size = 25) {
+  required <- c('date', 'precip', 'period_days', 'dl', 'fwet_mean', 'PT_mean',
+                'fSM_mean', 'PredLEday_RHVPD')
+  if (!all(required %in% names(x))) stop('Run the near-surface fit first to preserve the original ET target.')
+  proxy <- x[required]
+  proxy$FAPAR <- 0
+  proxy$PredLEsday_mean <- x$PredLEday_RHVPD
+  proxy$PredLEday_mean <- x$PredLEday_RHVPD
+  proxy$PredLEcday_mean <- 0
+  proxy$PredLEiday_mean <- 0
+  fitted <- fit_soil_bucket(proxy, initial, minimum, maximum, grid_size)
+  fields <- c(SM_et='SM', SM_et_mean='SM_mean', SM_et_end='SM_end', SMmax_et='SMmax',
+    fSM_et_mean='fSM_mean', fSM_et_start='fSM_start', PredLE_ETeffective='PredLEsday_mean',
+    ETbucket_period='Esoil_period', ETsurface_period='Esurface_period', ETbucket_overflow='bucket_overflow')
+  has_fit <- 'SMmax' %in% names(fitted) && all(is.finite(fitted$SMmax))
+  for (name in names(fields)) x[[name]] <- if (has_fit) fitted[[fields[[name]]]] else NA_real_
+  metadata <- c(SM_et_fit_status='SM_fit_status', SM_et_fit_RMSE='SM_fit_RMSE',
+    SM_et_initial_guess='SM_initial_guess', SM_et_search_min='SM_search_min',
+    SM_et_search_max='SM_search_max', SM_et_initialization='SM_initialization')
+  for (name in names(metadata)) x[[name]] <- fitted[[metadata[[name]]]]
+  if (all(fitted$SM_fit_status == 'unconstrained_full_bucket')) {
+    x$fSM_et_mean <- 1
+    x$fSM_et_start <- 1
+    x$PredLE_ETeffective <- fitted$PredLEsday_mean
+  }
+  x$PredLE_ETreference <- x$PredLEday_RHVPD
+  x$SM_et_integration <- if (has_fit) fitted$SM_integration else NA_character_
+  x$SM_et_units <- 'mm effective ET storage'
+  x$ETbucket_period_units <- 'mm/period'
+  x
+}
+
+# Retired transpiration-only bucket: see archive/transpiration_bucket_2026-09-18/README.md.
+# Absolute AWC from the user-supplied Saxton-model regression. Sand is %mass.
+# 0-30 cm texture is assumed representative of the effective profile.
+# Supply a sand_0_30cm_pct input column or set this site value; never infer missing texture.
+site_sand_0_30cm_pct <- NA_real_
+add_effective_depths <- function(x, sand_percent = NA_real_) {
+  sand <- if ('sand_0_30cm_pct' %in% names(x)) x$sand_0_30cm_pct else rep(sand_percent, nrow(x))
+  sand[!is.finite(sand) | sand < 0 | sand > 100] <- NA_real_
+  x$sand_0_30cm_pct <- sand
+  x$AWC_pct_vol <- 18.57 - 0.14 * sand
+  x$AWC_fraction <- x$AWC_pct_vol / 100
+  fields <- c(effective_soil_evaporation_depth_cm='SMmax',
+    effective_root_depth_et_cm='SMmax_et')
+  for (field in names(fields)) {
+    capacity <- x[[fields[[field]]]]
+    x[[field]] <- ifelse(is.finite(capacity) & capacity > 0, capacity / x$AWC_fraction / 10, NA_real_)
+  }
+  x
+}
+
+plot_soil_storage_diagnostics <- function(x) {
+  old <- par(mfrow=c(2,2), mar=c(4,4,5,1))
+  on.exit(par(old))
+  panel <- function(field, title, ylab, cap=NULL, reference=NULL) {
+    values <- if (field %in% names(x)) x[[field]] else rep(NA_real_,nrow(x))
+    if (!any(is.finite(values))) { plot.new(); title(main=title); text(0.5,0.5,'Fit unavailable'); return(invisible(NULL)) }
+    upper <- if (!is.null(cap)) max(x[[cap]],na.rm=TRUE) else 1
+    plot(x$date,values,type='l',xlab='Date',ylab=ylab,main='',ylim=c(0,upper))
+    title(main=title,line=3.5)
+    if (!is.null(cap)) {
+      lines(x$date,x[[cap]],lty=2,col='grey50')
+      field <- switch(cap, SMmax='effective_soil_evaporation_depth_cm', SMmax_et='effective_root_depth_et_cm')
+      depth <- x[[field]]
+      label <- if (cap=='SMmax') 'Effective soil evaporation depth' else 'Effective root depth'
+      value <- if (any(is.finite(depth))) sprintf('%.2f m (%.2f ft)',mean(depth,na.rm=TRUE)/100,mean(depth,na.rm=TRUE)/30.48) else 'unavailable'
+      mtext(paste0(label,': ',value),side=3,line=1.8,cex=0.75)
+      rmse <- x[[if (cap=='SMmax') 'SM_fit_RMSE' else 'SM_et_fit_RMSE']][1]
+      flux <- if (cap=='SMmax') 'Soil evaporation' else 'ET'
+      text <- if (is.finite(rmse)) sprintf('%.2f W/m^2',rmse) else 'unavailable'
+      mtext(paste0(flux,' RMSE (bucket vs ACCLIM): ',text),side=3,line=0.3,cex=0.75)
+    }
+    if (!is.null(reference)) {
+      lines(x$date,x[[reference]],col='tomato')
+      legend('topright',c('Bucket','RH/VPD'),col=c('black','tomato'),lty=1,bty='n',cex=0.7)
+    }
+  }
+  panel('SM_mean','Near-surface soil moisture','mm',cap='SMmax')
+  panel('fSM_mean','Near-surface moisture constraint','Fraction',reference='fSM_RHVPD')
+  panel('SM_et_mean','ET-constrained soil moisture','mm',cap='SMmax_et')
+  panel('fSM_et_mean','ET-constrained moisture constraint','Fraction')
+}
+
+# Fit after the baseline time series is complete; preserves *_RHVPD diagnostics.
+# Capacity search begins at 100 mm, bounded to 1-2000 mm; inspect status/RMSE.
+data <- fit_soil_bucket(data)
+data <- fit_et_bucket(data)
+data <- add_effective_depths(data, site_sand_0_30cm_pct)
+print(unique(data[c("AWC_pct_vol", "effective_soil_evaporation_depth_cm", "effective_root_depth_et_cm")]))
+print(unique(data[c('SM_fit_status', 'SM_fit_RMSE', 'SM_et_fit_status', 'SM_et_fit_RMSE')]))
+plot_soil_storage_diagnostics(data)
+
+```
