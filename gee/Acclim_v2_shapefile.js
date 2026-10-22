@@ -1306,6 +1306,33 @@ function effectiveDepthFields(row, sandPercent) {
   });
   return result;
 }
+// Source-depth mixing uses the same ORIGINAL flux partition as the ET fit.
+// Interception remains in total ET with zero soil-source depth.
+// Integrate daytime LE over each period; do not average monthly flux ratios.
+function transpirationSourceDepth(rows) {
+  var tSum = 0, etSum = 0, eSum = 0, depthMoment = 0;
+  var valid = rows.length > 0;
+  rows.forEach(function(r) {
+    var t = r.PredLEcday_mean, e = r.PredLEsday_RHVPD;
+    var et = r.PredLE_ETreference;
+    var zET = r.effective_root_depth_et_cm;
+    var zE = r.effective_soil_evaporation_depth_cm;
+    var values = [t, e, et, r.daylength, r.period_days, zET, zE];
+    if (!values.every(carbonFinite) || t < 0 || e < 0 || et < t + e - 1e-8 ||
+        r.daylength <= 0 || r.period_days <= 0 || zET < 0 || zE < 0) {
+      valid = false; return;
+    }
+    var factor = r.daylength * 3600 * r.period_days / 2450000;
+    tSum += t * factor; eSum += e * factor; etSum += et * factor;
+    depthMoment += (zET * et - zE * e) * factor;
+  });
+  var depth = valid && tSum > 0 && etSum > 0 ? depthMoment / tSum : null;
+  return {
+    effective_root_depth_t_cm: carbonFinite(depth) && depth >= 0 ? depth : null,
+    root_depth_T_fraction: valid && etSum > 0 ? tSum / etSum : null,
+    root_depth_E_fraction: valid && etSum > 0 ? eSum / etSum : null
+  };
+}
 function depthChartLabel(info, field, label) {
   return label + ': ' + (carbonFinite(info[field]) ? (info[field] / 100).toFixed(2) + ' m (' + (info[field] / 30.48).toFixed(2) + ' ft)' : 'unavailable');
 }
@@ -1337,9 +1364,9 @@ function addETMoistureCharts(output, info, regionName) {
     addResultChart(ui.Chart.feature.byFeature(output, 'date', ['SM_et_mean', 'SMmax_et', 'precip'])
       .setChartType('ComboChart')
       .setSeriesNames(['SM,ET mean', 'SMmax,ET', 'precip'])
-      .setOptions({title: regionChartTitle('Soil Moisture - Root Zone', regionName) + '\n' + depthChartLabel(info, 'effective_root_depth_et_cm', 'Effective root depth'),
+      .setOptions({title: regionChartTitle('Soil Moisture - Root Zone', regionName) + '\n' + depthChartLabel(info, 'effective_root_depth_t_cm', 'effective_root_depth_t_cm'),
         chartArea: {top: 110}, hAxis: {title: 'Date'},
-        vAxes: {0: {title: 'Soil moisture / precipitation (mm)', viewWindow: {min: 0}},
+        vAxes: {0: {title: 'Extractable soil moisture (mm)', viewWindow: {min: 0}},
                 1: {title: 'Precipitation (mm)', viewWindow: {min: 0},
                     gridlines: {color: 'transparent'}, minorGridlines: {color: 'transparent'}}},
         seriesType: 'line',
@@ -1949,7 +1976,7 @@ function addSoilMoistureChart(output, geom, requestId, regionName, info) {
   var baseTitle = regionChartTitle('Soil Moisture - Near Surface', regionName);
   var options = {title: baseTitle, chartArea: {top: 100},
     hAxis: {title: 'Date'},
-    vAxes: {0: {title: 'mm', viewWindow: {min: 0}},
+    vAxes: {0: {title: 'Extractable soil moisture (mm)', viewWindow: {min: 0}},
                 1: {title: 'Precipitation (mm)', viewWindow: {min: 0},
                     gridlines: {color: 'transparent'}, minorGridlines: {color: 'transparent'}}},
     seriesType: 'line',
@@ -2046,10 +2073,19 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
         row.SM_et_r2 = carbonFinite(row.SMmax_et) ? etR2 : null;
         var depths = effectiveDepthFields(row, sandPercent);
         Object.keys(depths).forEach(function(key) { row[key] = depths[key]; });
+        var tDepth = transpirationSourceDepth([row]);
+        Object.keys(tDepth).forEach(function(key) { row[key] = tDepth[key]; });
       });
       output = carbonRowsToFC(result.monthly);
-      UI._lastOutput = output; // monthly CSV includes AWC and both effective depths
-      var bucketInfo = result.monthly.length ? result.monthly[0] : {};
+      UI._lastOutput = output; // monthly CSV includes AWC and ET, E, and T source depths
+      var bucketInfo = {};
+      if (result.monthly.length) Object.keys(result.monthly[0]).forEach(function(key) {
+        bucketInfo[key] = result.monthly[0][key];
+      });
+      var selectedPeriodDepth = transpirationSourceDepth(result.monthly);
+      Object.keys(selectedPeriodDepth).forEach(function(key) {
+        bucketInfo[key] = selectedPeriodDepth[key];
+      });
       var products = buildCarbonProducts(result.monthly, result.annual, start, end);
       UI._lastDaily = carbonRowsToFC(products.daily);
       UI._last16day = carbonRowsToFC(products.npp16day);
@@ -2160,7 +2196,7 @@ function makeLabeledInput(labelText, defaultVal) {
 // The asset dropdown is populated synchronously from the ecoexplorer asset
 // folder. ee.data.listAssets is a blocking client call, so we can build the
 // items list at script-load time.
-UI.ASSET_FOLDER = 'projects/ee-landflux/assets/ecoexplorer';
+UI.ASSET_FOLDER = 'projects/ee-landflux/assets/public';
 UI.assetList = [];   // [{name, assetId}, ...]
 try {
   var rawAssets = ee.data.listAssets(UI.ASSET_FOLDER).assets || [];
@@ -2187,7 +2223,7 @@ UI.assetSelector = ui.Select({
 UI.uploadLink = ui.Label({
   value: '↗ Upload a polygon (KML / shapefile / GeoJSON)',
   style: { fontSize: '12px', color: '#1976D2', margin: '4px 0px 8px 0px' },
-  targetUrl: 'https://ecoexplorer-uploader.streamlit.app/'
+  targetUrl: 'https://ecoexplorer-uploader-public.streamlit.app/'
 });
 
 UI.geomHelp = ui.Label({
@@ -2615,7 +2651,7 @@ function onRun() {
     addOptionalSeriesChart(chartCache,
       ['Tsurface_mean', 'Tcanopy_mean', 'Tsoil_mean', 'Tday_mean', 'Tsurface_max', 'Tmax_mean', 'LST', 'Aqua_LST'],
       ['Tsurface_mean', 'Tcanopy_mean', 'Tsoil_mean', 'Tair', 'Tsurface_max', 'Tmax', 'Terra LST', 'Aqua LST'],
-      ['#000000', '#2E7D32', '#8D6E63', '#1976D2', '#EF6C00', '#8E24AA', '#000000', '#D81B60'], [4, 5, 6, 7], {
+      ['#000000', '#2E7D32', '#8D6E63', '#1976D2', '#EF6C00', '#8E24AA', '#000000', '#D81B60'], [0, 1, 2, 3, 5, 6], {
         series: {6: {color: '#000000', lineWidth: 0, pointSize: 3, pointShape: 'circle'},
           7: {color: '#D81B60', lineWidth: 0, pointSize: 3, pointShape: 'circle'}},
         title: regionChartTitle('Surface, Canopy & Soil Temperatures', regionName), chartArea: {top: 80},
@@ -2756,7 +2792,7 @@ ui.root.clear();
 // Floating overlays preserve a full-size map; no sidebar or split panel.
 function makeCollapsibleMapPanel(titleWidget, content, position, width, expanded, fullHeight) {
   var body = ui.Panel({widgets: [content], layout: ui.Panel.Layout.flow('vertical'),
-    style: {stretch: 'both', shown: expanded}});
+    style: {stretch: 'horizontal', height: '480px', maxHeight: '60vh', shown: expanded}});
   var toggle = ui.Button({label: expanded ? '▼' : '▶',
     style: {width: '36px', margin: '2px 6px 2px 0px'}});
   var header = ui.Panel({widgets: [toggle, titleWidget], layout: ui.Panel.Layout.flow('horizontal'),
@@ -2839,7 +2875,7 @@ UI.map.add(UI.baseMapPanel);
 UI.leftControlsRow = ui.Panel({widgets: [UI.zoomPanel, UI.controlsOverlay.panel],
   layout: ui.Panel.Layout.flow('horizontal'),
   style: {position: 'top-left', margin: '8px', padding: '0px',
-    maxWidth: '48%', maxHeight: '85%', backgroundColor: 'rgba(0,0,0,0)'}});
+    width: '95%', maxWidth: '480px', maxHeight: '85%', backgroundColor: 'rgba(0,0,0,0)'}});
 UI.map.add(UI.leftControlsRow);
 UI.map.add(UI.resultsOverlay.panel);
 UI.map.add(UI.resultsOverlay.launcher);

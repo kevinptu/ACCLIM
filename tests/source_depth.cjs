@@ -1,0 +1,20 @@
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const src = fs.readFileSync(require('path').join(__dirname, '../gee/Acclim_v2_shapefile.js'), 'utf8');
+const ctx = {carbonFinite: x => typeof x === 'number' && Number.isFinite(x)};
+vm.createContext(ctx);
+vm.runInContext(src.slice(src.indexOf('function transpirationSourceDepth('), src.indexOf('function depthChartLabel(')), ctx);
+const row = {PredLEcday_mean: 60, PredLEsday_RHVPD: 40, PredLE_ETreference: 100,
+ daylength: 12, period_days: 30, effective_root_depth_et_cm: 100, effective_soil_evaporation_depth_cm: 10};
+const solve = rows => ctx.transpirationSourceDepth(rows).effective_root_depth_t_cm;
+assert.strictEqual(solve([row]), 160);
+assert.strictEqual(solve([{...row, PredLEcday_mean:100,PredLEsday_RHVPD:0}]), 100);
+assert.strictEqual(solve([{...row,PredLEcday_mean:0}]), null);
+assert.strictEqual(solve([{...row,effective_soil_evaporation_depth_cm:null}]), null);
+assert.strictEqual(solve([{...row,effective_root_depth_et_cm:1}]), null);
+assert.strictEqual(solve([]), null);
+const b={...row,PredLEcday_mean:20,PredLEsday_RHVPD:80,period_days:15};
+assert(Math.abs(solve([row,b])-(9600*30+9200*15)/(60*30+20*15))<1e-10);
+assert.strictEqual(solve([{...row,PredLE_ETreference:110}]), (11000-400)/60);
+assert.strictEqual((src.match(/title: 'Extractable soil moisture \(mm\)'/g)||[]).length,2);
+assert(src.includes("depthChartLabel(info, 'effective_root_depth_t_cm', 'effective_root_depth_t_cm')"));
+console.log('Passed depth mixing, period weighting, interception, invalid/zero-transpiration cases, and chart labels.');
