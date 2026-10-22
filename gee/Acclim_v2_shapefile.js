@@ -1312,22 +1312,31 @@ function effectiveDepthFields(row, sandPercent) {
 function transpirationSourceDepth(rows) {
   var tSum = 0, etSum = 0, eSum = 0, depthMoment = 0;
   var valid = rows.length > 0;
+  var excluded = 0, included = 0;
   rows.forEach(function(r) {
     var t = r.PredLEcday_mean, e = r.PredLEsday_RHVPD;
     var et = r.PredLE_ETreference;
     var zET = r.effective_root_depth_et_cm;
     var zE = r.effective_soil_evaporation_depth_cm;
+    // No evaporative source depth is defined when all component fluxes are nonpositive.
+    // Exclude these periods from the diagnostic only; retain original model fluxes.
+    if ([t, e, et].every(carbonFinite) && t <= 0 && e <= 0 && et <= 0) {
+      excluded++; return;
+    }
     var values = [t, e, et, r.daylength, r.period_days, zET, zE];
     if (!values.every(carbonFinite) || t < 0 || e < 0 || et < t + e - 1e-8 ||
         r.daylength <= 0 || r.period_days <= 0 || zET < 0 || zE < 0) {
       valid = false; return;
     }
+    included++;
     var factor = r.daylength * 3600 * r.period_days / 2450000;
     tSum += t * factor; eSum += e * factor; etSum += et * factor;
     depthMoment += (zET * et - zE * e) * factor;
   });
   var depth = valid && tSum > 0 && etSum > 0 ? depthMoment / tSum : null;
   return {
+    root_depth_periods_included: included,
+    root_depth_periods_non_evaporating: excluded,
     effective_root_depth_t_cm: carbonFinite(depth) && depth >= 0 ? depth : null,
     root_depth_T_fraction: valid && etSum > 0 ? tSum / etSum : null,
     root_depth_E_fraction: valid && etSum > 0 ? eSum / etSum : null
