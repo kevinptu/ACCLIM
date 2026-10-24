@@ -14,3 +14,5 @@ GPP_Project/
 data/
 outputs/
 node_modules/
+.venv/
+__pycache__/

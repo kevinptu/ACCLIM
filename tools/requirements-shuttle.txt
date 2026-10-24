@@ -1,0 +1,2 @@
+# Official Shuttle revision reviewed 2026-10-24. Install in an isolated environment.
+fluxnet-shuttle @ git+https://github.com/fluxnet/shuttle.git@028818791fef116db03e97f3f6b0aebdf1a89e90

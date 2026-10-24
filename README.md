@@ -35,3 +35,7 @@ The Root Zone chart reports effective_root_depth_t_cm using zT = (zET * ET - zE 
 ## Local checks
 
 Run `node --check gee/Acclim_v2_shapefile.js` and `node tests/source_depth.cjs`. These check syntax and source-depth calculations; they do not execute Earth Engine.
+
+## Tower comparisons and FLUXNET Shuttle
+
+Use the [tower importer](https://kevinptu.github.io/ACCLIM/tower-csv-importer.html) for Quanterra CSVs or FLUXNET ZIP/subdaily CSV files. Monthly means retain all available daytime GPP and report missing percentages without a coverage cutoff. The app supports both NT/DT estimates, automatic coordinates/dates, and monthly coverage reports. See [importer and batch instructions](tools/README.md) for the optional pinned Shuttle download workflow and validation.

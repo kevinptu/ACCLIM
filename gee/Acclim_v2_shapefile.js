@@ -2004,6 +2004,30 @@ function addSoilMoistureChart(output, geom, requestId, regionName, info) {
 
 // Aligned Celsius/Fahrenheit axes: identical physical bounds and tick positions.
 // Annual climate summaries use 24-hour air temperature, not daytime Tair.
+// Sum daily carbon fluxes without annualizing partial years or filling missing days.
+function annualCarbonNote(rows, fields, labels) {
+  var years = {};
+  rows.forEach(function(r) {
+    var year = r.date.slice(0, 4);
+    if (!years[year]) years[year] = {};
+    years[year][r.date] = r;
+  });
+  return fields.map(function(field, index) {
+    var totals = Object.keys(years).sort().map(function(year) {
+      var sum = 0, complete = true;
+      var end = Date.UTC(Number(year) + 1, 0, 1);
+      for (var ms = Date.UTC(Number(year), 0, 1); ms < end; ms += 86400000) {
+        var key = new Date(ms).toISOString().slice(0, 10);
+        var row = years[year][key];
+        if (!row || !carbonFinite(row[field])) complete = false;
+        else sum += row[field];
+      }
+      return year + ': ' + (complete ? sum.toFixed(1) : 'unavailable (incomplete year/data)');
+    });
+    return 'Annual ' + labels[index] + ' (gC/m²/yr): ' + totals.join('; ');
+  }).join('\n');
+}
+
 function annualClimateNote(rows, start, end, variable) {
   var years = {};
   rows.forEach(function(row) {
@@ -2097,6 +2121,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       });
       var products = buildCarbonProducts(result.monthly, result.annual, start, end);
       UI._lastDaily = carbonRowsToFC(products.daily);
+      if (UI._annualGPPNote) UI._annualGPPNote.setValue(annualCarbonNote(products.daily, ['GPPdaily'], ['GPP']));
       UI._last16day = carbonRowsToFC(products.npp16day);
       addOptionalSeriesChart({rows: products.daily},
         ['NPPdaily', 'NPPgrass', 'NPPshrub', 'NPPtree'],
@@ -2104,7 +2129,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
         ['#000000', '#2E7D32', '#EF6C00', '#1976D2'], [1, 2, 3], {
           title: regionChartTitle('Daily NPP', regionName), chartArea: {top: 80},
           hAxis: {title: 'Date'}, vAxis: {title: 'g C/m2/day'}, lineWidth: 1.5, pointSize: 0
-        });
+        }, annualCarbonNote);
       var hasBiomass = products.npp16day.some(function(r) { return carbonFinite(r.HerbaceousAGB16day) || carbonFinite(r.HerbaceousBGB16day); });
       if (hasBiomass) {
         // Chart-only Jan 1 anchors show zero before that day's production.
@@ -2279,6 +2304,7 @@ UI.faparSelector = ui.Select({items: [
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+setupTowerImport();
 UI.inputPanel.add(UI.runButton);
 
 UI.statusPanel = ui.Panel({
@@ -2341,7 +2367,7 @@ function chartReplacer() {
 }
 // Optional chart series use the monthly values already fetched for carbon products.
 // No server-side collection or evaluate call is used when the selection changes.
-function addOptionalSeriesChart(cache, properties, names, colors, optional, options) {
+function addOptionalSeriesChart(cache, properties, names, colors, optional, options, annualFooter) {
   var choices = [{label: 'Optional', value: '0'}];
   for (var mask = 1; mask < Math.pow(2, optional.length); mask++) {
     var labels = [];
@@ -2349,6 +2375,7 @@ function addOptionalSeriesChart(cache, properties, names, colors, optional, opti
     choices.push({label: 'Add ' + labels.join(' + '), value: String(mask)});
   }
   var selection = 0;
+  var annualNote = annualFooter ? ui.Label({value: '', style: {whiteSpace: 'pre-wrap'}}) : null;
   function build() {
     var selected = [], palette = [], seriesOptions = {};
     var cols = [{id: 'date', label: 'Date', type: 'date'}];
@@ -2368,6 +2395,7 @@ function addOptionalSeriesChart(cache, properties, names, colors, optional, opti
       });
       return {c: cells};
     });
+    if (annualNote) annualNote.setValue(annualFooter(cache.rows || [], selected, selected.map(function(p) { return names[properties.indexOf(p)]; })));
     var chartOptions = {};
     Object.keys(options).forEach(function(key) { chartOptions[key] = options[key]; });
     chartOptions.colors = palette;
@@ -2381,8 +2409,112 @@ function addOptionalSeriesChart(cache, properties, names, colors, optional, opti
     onChange: function(value) { selection = Number(value); redraw(build()); },
     style: {margin: '4px 8px', stretch: 'horizontal'}});
   UI._chartCard.add(selector);
+  if (annualNote) addChartNote(annualNote);
   if (!cache.rows) cache.ready.push(function() { redraw(build()); selector.setDisabled(false); });
   if (cache.refresh) cache.refresh.push(function() { redraw(build()); });
+}
+
+// Tower monthly values are prepared locally with tower-csv-importer.html.
+// No raw tower records or metadata are uploaded to Earth Engine assets.
+function parseTowerMonthly(text) {
+  var data = JSON.parse(text), seen = {};
+  if ((data.version !== 2 && data.version !== 3) || data.units !== 'micromol/m2/s' ||
+      data.filter !== 'INCOMING_SHORTWAVE_RADIATION > 0' ||
+      !Array.isArray(data.daily) || !data.daily.length || data.daily.length > 40000) {
+    throw new Error('Use the updated tower-csv-importer.html output.');
+  }
+  data.daily.forEach(function(row) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(row.date) ||
+        !isFinite(Date.parse(row.date)) || new Date(row.date).toISOString().slice(0,10) !== row.date || seen[row.date] ||
+        !carbonFinite(row.sum) || !carbonFinite(row.n) || row.n < 0 || row.n % 1 !== 0) {
+      throw new Error('Invalid or duplicate daily tower summary.');
+    }
+    if(data.version===3) {
+      ['daylight','total','unknownLight','absent','secondN'].forEach(function(k){if(!carbonFinite(row[k])||row[k]<0||row[k]%1!==0)throw new Error('Invalid coverage count.');});
+      if(!carbonFinite(row.secondSum)||row.n>row.daylight||row.secondN>row.daylight||row.daylight+row.unknownLight>row.total||(!row.n&&row.sum!==0)||(!row.secondN&&row.secondSum!==0))throw new Error('Inconsistent tower coverage.');
+    }
+    seen[row.date] = true;
+  });
+  data.daily.sort(function(a,b) { return a.date < b.date ? -1 : 1; });
+  var valid=data.daily.filter(function(row){return row.n>0 || row.secondN>0;});
+  if(!valid.length)throw new Error('No valid daytime GPP.');
+  data.start=valid[0].date;data.end=valid[valid.length-1].date;
+  data.site = String(data.site || 'Tower CSV');
+  if (data.latitude !== null && (!carbonFinite(data.latitude) || Math.abs(data.latitude) > 90)) throw new Error('Invalid latitude.');
+  if (data.longitude !== null && (!carbonFinite(data.longitude) || Math.abs(data.longitude) > 180)) throw new Error('Invalid longitude.');
+  return data;
+}
+function towerMonthsInRange(tower, start, end) {
+  var months = {};
+  tower.daily.forEach(function(day) {
+    if (day.date < start || day.date > end) return;
+    var key = day.date.slice(0,7), m = months[key] || (months[key] = {sum:0,n:0,days:0,secondSum:0,secondN:0,daylight:0,total:0,unknownLight:0,absent:0});
+    ['sum','n','secondSum','secondN','daylight','total','unknownLight','absent'].forEach(function(k){m[k] += day[k] || 0;});
+    if(tower.version === 2 || day.total > 0) m.days++;
+  });
+  Object.keys(months).forEach(function(key) {
+    var m=months[key]; m.gpp=m.n ? m.sum/m.n : null; m.secondGpp=m.secondN ? m.secondSum/m.secondN : null;
+    m.missingPct=tower.version===3 && m.daylight ? 100*(m.daylight-m.n)/m.daylight : null;
+    m.secondMissingPct=tower.version===3 && m.daylight ? 100*(m.daylight-m.secondN)/m.daylight : null;
+  });
+  return months;
+}
+function setupTowerImport() {
+  UI.inputPanel.add(ui.Label({value: 'Open flux tower CSV importer',
+    targetUrl: 'https://kevinptu.github.io/ACCLIM/tower-csv-importer.html', style: {color: '#1565C0'}}));
+  UI.towerInput = ui.Textbox({placeholder: 'Tower CSV data: paste importer output', style: {stretch:'horizontal'}});
+  UI.towerNote = ui.Label({value:'Prepare your CSV with tower-csv-importer.html. Import before running ACCLIM.', style:{whiteSpace:'pre-wrap'}});
+  function load(defaults) {
+    try {
+      var data = parseTowerMonthly(UI.towerInput.getValue());
+      if (defaults && (data.latitude === null || data.longitude === null)) throw new Error('CSV coordinates missing. Enter coordinates manually and use Load with current settings.');
+      UI._towerData = data;
+      if (defaults) {
+        UI.latitude.setValue(String(data.latitude)); UI.longitude.setValue(String(data.longitude));
+        UI.useCoordinates.setValue(true);
+        UI.startI.input.setValue(data.start); UI.endI.input.setValue(data.end);
+      }
+      UI.towerNote.setValue(data.site + ': ' + data.start + ' to ' + data.end +
+        '. Review/edit coordinates and dates, then Run ACCLIM. Existing results are unchanged until you run again.');
+    } catch(error) { UI.towerNote.setValue('Tower import error: ' + error.message); }
+  }
+  UI.inputPanel.add(UI.towerInput);
+  UI.inputPanel.add(ui.Button({label:'Use CSV coordinates and dates', onClick:function(){load(true);}}));
+  UI.inputPanel.add(ui.Button({label:'Load with current settings', onClick:function(){load(false);}}));
+  UI.inputPanel.add(ui.Button({label:'Clear tower import',onClick:function(){UI._towerData=null;UI.towerInput.setValue('');UI.towerNote.setValue('Tower import cleared. Run again to update the chart.');}}));
+  UI.inputPanel.add(UI.towerNote);
+}
+function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
+  var note=ui.Label({value:'Import tower data in the inputs before running ACCLIM.',style:{whiteSpace:'pre-wrap'}});
+  UI._chartCard.add(note); if(!tower)return;
+  var months=towerMonthsInRange(tower,start,end);
+  var coverage=ui.Label({value:'',style:{whiteSpace:'pre-wrap'}});
+  var monthChoice=ui.Select({items:[],placeholder:'Monthly tower coverage',onChange:function(key){
+    var m=months[key]; if(!m)return;
+    function pct(x){return x===null?'unavailable':x.toFixed(1)+'%';}
+    coverage.setValue(key+': missing GPP '+pct(m.missingPct)+(tower.secondVariable?'; missing '+tower.secondVariable+' '+pct(m.secondMissingPct):'')+
+      '. Valid primary/daytime records: '+m.n+'/'+m.daylight+'. Unknown radiation: '+(m.total?(100*m.unknownLight/m.total).toFixed(1)+'%':'unavailable')+
+      '; absent intervals: '+m.absent+'. No coverage cutoff. Missing percentages exclude records whose daytime status is unknown.');
+  }});
+  UI._chartCard.add(monthChoice).add(coverage);
+  function update(){
+    var count=0,partial=[],keys=[];
+    cache.rows.forEach(function(row){
+      var key=row.date.slice(0,7),m=months[key];
+      row.TowerGPP=m?m.gpp:null;row.TowerGPP2=m?m.secondGpp:null;row.TowerGPP_count=m?m.n:null;
+      row.TowerGPP_missing_pct=m?m.missingPct:null;row.TowerGPP2_missing_pct=m?m.secondMissingPct:null;
+      if(m){keys.push(key);if(m.n||m.secondN)count++;var p=key.split('-'),days=new Date(Number(p[0]),Number(p[1]),0).getDate();if(m.days<days)partial.push(key);}
+    });
+    monthChoice.items().reset(keys);if(keys.length)monthChoice.setValue(keys[0]);
+    var mismatch=!coordinateMode||tower.latitude===null||tower.longitude===null||Math.abs(lat-tower.latitude)>0.00001||Math.abs(lon-tower.longitude)>0.00001;
+    var provenance=tower.provenance||{};
+    note.setValue(tower.site+': '+count+' overlapping months with GPP. Primary: '+(tower.gppVariable||'GPP')+(tower.secondVariable?'; additional: '+tower.secondVariable:'')+
+      '. '+(mismatch?'Verify selected location against tower coordinates. ':'')+'Whole-footprint observations; dates '+start+' through '+end+'. '+
+      (partial.length?'Partial-month coverage: '+partial.join(', ')+'. Model points remain full-month estimates. ':'')+
+      (provenance.citation?'Citation: '+provenance.citation+' ':'')+(provenance.productId?'Product: '+provenance.productId:''));
+    cache.refresh.forEach(function(refresh){refresh();});
+  }
+  if(cache.rows)update();else cache.ready.push(update);
 }
 
 // Independent observation requests: never include model graphs in LST reductions.
@@ -2560,6 +2692,9 @@ function onRun() {
 
   var startDate = UI.startI.input.getValue();
   var endDate = UI.endI.input.getValue();
+  var runTower = UI._towerData;
+  var towerLat = Number(UI.latitude.getValue()), towerLon = Number(UI.longitude.getValue());
+  var towerCoordinateMode = UI.useCoordinates.getValue();
   var geom;
   try { geom = resolveGeometry(); }
   catch (coordinateError) { setStatus(coordinateError.message); return; }
@@ -2619,21 +2754,32 @@ function onRun() {
       conductanceChart.setOptions(conductanceOptions);
       chartCache.ready.forEach(function(ready) { ready(); });
       chartCache.ready = [];
-      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2'],
-        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2'],
-        ['#000000', '#1976D2', '#2E7D32', '#8E24AA'], [2, 3], {
+      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI'],
+        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI'],
+        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00'], [2, 3, 4], {
           series: {0: {color: '#000000', lineDashStyle: [6, 4]},
             1: {color: '#1976D2', lineDashStyle: [6, 4]},
-            2: {color: '#2E7D32'}, 3: {color: '#8E24AA'}},
+            2: {color: '#2E7D32'}, 3: {color: '#8E24AA'},
+            4: {color: '#EF6C00', targetAxisIndex: 1}},
           title: regionChartTitle('FAPAR & C4 Fraction', regionName), chartArea: {top: 80},
-          hAxis: {title: 'Date'}, vAxis: {title: 'Fraction / vegetation index'}, lineWidth: 1.2, pointSize: 0
+          hAxis: {title: 'Date'},
+          vAxes: {0: {title: 'Fraction / vegetation index'},
+            1: {title: 'Green LAI (m² leaf/m² ground)', viewWindow: {min: 0},
+              gridlines: {color: 'transparent'}, minorGridlines: {color: 'transparent'}}},
+          lineWidth: 1.2, pointSize: 0
         });
     };
-    addOptionalSeriesChart(chartCache, ['PredGPPmean', 'GPPmax', 'Amax'],
-      ['GPPmean', 'GPPmax', 'Amax'], ['#2E7D32', '#1976D2', '#EF6C00'], [2], {
+    var extraTower=runTower && runTower.secondVariable;
+    addOptionalSeriesChart(chartCache, ['PredGPPmean', 'GPPmax', 'Amax', 'TowerGPP'].concat(extraTower?['TowerGPP2']:[]),
+      ['GPPmean', 'GPPmax', 'Amax', 'Tower '+(runTower && runTower.gppVariable || 'GPP')].concat(extraTower?['Tower '+extraTower]:[]),
+      ['#2E7D32', '#1976D2', '#EF6C00', '#111111'].concat(extraTower?['#8E24AA']:[]), extraTower?[2,3,4]:[2,3], {
+        series: {3: {lineWidth: 0, pointSize: 5},4:{lineWidth:0,pointSize:5}},
         title: regionChartTitle('GPP', regionName), chartArea: {top: 80},
         hAxis: {title: 'Date'}, vAxis: {title: 'umol/m2/s (daytime)'}, lineWidth: 1.5, pointSize: 0
       });
+    addTowerControls(chartCache, runTower, startDate, endDate, towerLat, towerLon, towerCoordinateMode);
+    UI._annualGPPNote = ui.Label({value: 'Annual GPP: calculating...', style: {whiteSpace: 'pre-wrap'}});
+    addChartNote(UI._annualGPPNote);
     addResultChart(etChart);
     function addRemainingDiagnosticCharts() {
     conductanceChart = ui.Chart.feature.byFeature(output, 'date', ['gs', 'rs'])

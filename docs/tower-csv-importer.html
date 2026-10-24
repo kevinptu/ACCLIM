@@ -1,53 +1,11 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><title>ACCLIM tower CSV importer</title>
-<style>body{font:17px system-ui;max-width:900px;margin:40px auto;padding:20px}textarea{width:100%;height:180px}button,input{margin:12px 0;padding:10px}pre{white-space:pre-wrap}h1{color:#26743a}</style>
-<h1>Import flux tower GPP</h1><p>Select a Quanterra CSV. Processing stays in your browser. Valid GPP records with INCOMING_SHORTWAVE_RADIATION &gt; 0 are averaged by local calendar month, using MIDPOINT_DATETIME. Supplied negative GPP and gap-filled values are retained. Missing values are excluded.</p>
-<input id="file" type="file" accept=".csv,text/csv"><pre id="status"></pre>
-<p>Paste the result into “Tower CSV data” in ACCLIM's inputs and click “Use CSV coordinates and dates”. Review or edit the populated fields, then Run ACCLIM and select “Add Flux tower GPP”. These are whole-footprint observations, not adjusted to a selected cover fraction.</p>
-<button id="copy" disabled>Copy monthly data</button><textarea id="result" readonly aria-label="Monthly tower data"></textarea><pre id="summary"></pre>
-<script>
-function csvRows(text) {
-  var rows=[],row=[],value='',quoted=false;
-  for(var i=0;i<text.length;i++) { var c=text[i];
-    if(c==='"') { if(quoted && text[i+1]==='"'){value+='"';i++;}else quoted=!quoted; }
-    else if(c===',' && !quoted){row.push(value);value='';}
-    else if((c==='\n'||c==='\r')&&!quoted){if(c==='\r'&&text[i+1]==='\n')i++;row.push(value);rows.push(row);row=[];value='';}
-    else value+=c;
-  }
-  if(quoted)throw Error('Unclosed CSV quote.');
-  if(value.length||row.length){row.push(value);rows.push(row);}return rows;
-}
-function towerMonthly(text, name) {
-  var rows=csvRows(text.replace(/^\uFEFF/,''));
-  var hi=rows.findIndex(r=>r.includes('GPP')&&r.includes('INCOMING_SHORTWAVE_RADIATION'));
-  if(hi<0)throw Error('Missing GPP or INCOMING_SHORTWAVE_RADIATION columns.');
-  var h=rows[hi],gi=h.indexOf('GPP'),si=h.indexOf('INCOMING_SHORTWAVE_RADIATION'),ti=h.indexOf('MIDPOINT_DATETIME');
-  if(ti<0)throw Error('MIDPOINT_DATETIME is required for local calendar months.');
-  if(!rows[hi+1] || rows[hi+1][gi]!=='micromol/m2/s')throw Error('Expected GPP units micromol/m2/s in the units row.');
-  function number(s){if(s==null||!s.trim())return NaN;var n=Number(s);return n===-9999||n===-999?NaN:n;}
-  var metadata=rows.slice(0,hi).map(r=>r.join(' ')).join('\n');
-  function coordinate(label,limit){var match=metadata.match(new RegExp('Location '+label+':\\s*([-+]?\\d+(?:\\.\\d+)?)','i'));var value=match?Number(match[1]):null;return value!==null&&Math.abs(value)<=limit?value:null;}
-  var location=metadata.match(/Location Name:\s*([^\r\n]+)/i);
-  var months={},daily={},seen={},steps=[],previous=null;
-  rows.slice(hi+2).forEach(r=>{
-    if(!r[ti])return;
-    var date=r[ti].trim(),m=/^(\d{4}-(?:0[1-9]|1[0-2]))-\d{2}[ T]\d{2}:\d{2}/.exec(date);
-    if(!m)throw Error('Unrecognized local timestamp: '+date);
-    var time=Date.parse(date.replace(' ','T')+'Z');
-    if(!Number.isFinite(time))throw Error('Invalid timestamp: '+date);
-    if(seen[date])throw Error('Duplicate timestamp: '+date);seen[date]=true;
-    if(previous!==null && time>previous)steps.push(time-previous);previous=time;
-    var g=number(r[gi]),sw=number(r[si]);
-    if(Number.isFinite(g)&&Number.isFinite(sw)&&sw>0){var day=date.slice(0,10);var b=months[m[1]]||(months[m[1]]={sum:0,n:0,days:{}});b.sum+=g;b.n++;b.days[day]=true;var d=daily[day]||(daily[day]={sum:0,n:0});d.sum+=g;d.n++;}
-  });
-  if(!steps.length||Math.min(...steps)>=86400000)throw Error('Daily-only records cannot resolve daytime GPP; supply the subdaily tower CSV.');
-  var result=Object.keys(months).sort().map(m=>({month:m,gpp:months[m].sum/months[m].n,n:months[m].n,days:Object.keys(months[m].days).length}));
-  if(!result.length)throw Error('No valid daytime GPP records.');
-  var days=Object.keys(daily).sort().map(date=>({date:date,sum:daily[date].sum,n:daily[date].n}));
-  return {version:2,site:location?location[1].trim():name,latitude:coordinate('Latitude',90),longitude:coordinate('Longitude',180),start:days[0].date,end:days[days.length-1].date,units:'micromol/m2/s',filter:'INCOMING_SHORTWAVE_RADIATION > 0',months:result,daily:days};
-}
-document.getElementById('file').onchange=async function(){
-  var out=document.getElementById('result'),status=document.getElementById('status'),copy=document.getElementById('copy');out.value='';copy.disabled=true;document.getElementById('summary').textContent='';
-  try{var f=this.files[0];if(!f)return;var data=towerMonthly(await f.text(),f.name);out.value=JSON.stringify(data);copy.disabled=false;status.textContent=data.site+' | Latitude: '+data.latitude+' | Longitude: '+data.longitude+'\nValid daytime observations: '+data.start+' to '+data.end+'\nReady: '+data.months.length+' months. Partial months are retained; check counts below.';document.getElementById('summary').textContent='Month       Mean GPP     Daytime records   Days represented\n'+data.months.map(m=>m.month+'     '+m.gpp.toFixed(3)+'          '+m.n+'             '+m.days).join('\n');}catch(e){status.textContent=e.message;}
-};
-document.getElementById('copy').onclick=async function(){var out=document.getElementById('result');out.select();try{await navigator.clipboard.writeText(out.value);}catch(e){document.getElementById('status').textContent='Press Ctrl+C to copy the selected monthly data.';}};
-</script></html>
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ACCLIM tower importer</title>
+<style>body{font:17px system-ui;max-width:1000px;margin:30px auto;padding:20px;color:#183024}h1{color:#26743a}label{display:block;margin:12px 0}input,select,button{font:inherit;padding:8px;max-width:100%;box-sizing:border-box}textarea{width:100%;height:110px}pre{white-space:pre-wrap}td,th{padding:6px;border-bottom:1px solid #ddd;text-align:right}table{font-size:14px;border-collapse:collapse}button{margin:10px 8px 10px 0}.scroll{overflow:auto}</style>
+<h1>Import flux tower GPP</h1><p><a href="https://data.fluxnet.org/" target="_blank" rel="noopener">Find FLUXNET tower data</a> · <a href="https://ee-landflux.projects.earthengine.app/view/acclim" target="_blank" rel="noopener">Open ACCLIM</a></p>
+<p>Select a FLUXNET ZIP or subdaily CSV, or a Quanterra CSV. Processing stays in your browser; files are not uploaded or stored by this page.</p>
+<label>Data file <input id="file" type="file" accept=".csv,.zip"></label><label id="archiveLabel" hidden>File in ZIP <select id="archive"></select></label>
+<section id="settings" hidden><label>Primary GPP <select id="variable"></select></label><label>Additional GPP <select id="second"></select></label><label>Incoming shortwave <select id="radiation"></select></label><label>Site <input id="site"></label><label>Latitude <input id="latitude" type="number" step="any"></label><label>Longitude <input id="longitude" type="number" step="any"></label><label>Optional Shuttle snapshot CSV <input id="metadata" type="file" accept=".csv"></label><label>Dataset citation <input id="citation" style="width:100%"></label><label>DOI / product ID <input id="productId" style="width:100%"></label><button id="prepare">Prepare comparison</button></section>
+<p id="status" role="status" aria-live="polite">Choose a file to begin.</p>
+<p>Means use every finite GPP value when shortwave &gt; 0, including gap-filled and negative values. No coverage cutoff is applied. Missing GPP (%) is the percentage missing among records with known positive shortwave. Missing radiation and absent timestamps are reported separately because their daytime status is unknown. NT/DT identify partitioning methods, not the hours averaged.</p>
+<section id="results" hidden><p>Paste the summary into ACCLIM’s <b>Tower CSV data</b>, choose <b>Use CSV coordinates and dates</b> or <b>Load with current settings</b>, then Run ACCLIM and enable the tower chart series. Observations represent the whole footprint; partial-month observations may differ from full-month model estimates.</p><button id="copy">Copy ACCLIM data</button><button id="download">Save summary JSON</button><textarea id="result" readonly aria-label="Prepared ACCLIM data"></textarea>
+<div class="scroll"><table><thead><tr><th>Month</th><th>GPP</th><th>Missing %</th><th>Other GPP</th><th>Other missing %</th><th>Unknown radiation %</th><th>Absent intervals</th><th>Days present</th></tr></thead><tbody id="summary"></tbody></table></div><p>GPP units: µmol CO₂ m⁻² s⁻¹. Unknown-radiation percentage uses all supplied records. Absent intervals are counted only between the first and last supplied timestamps.</p><details><summary>Quality and provenance</summary><pre id="quality"></pre></details></section>
+<script src="tower-core.js"></script><script src="tower-ui.js"></script></html>
