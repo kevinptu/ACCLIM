@@ -2528,14 +2528,23 @@ function towerWeatherPlan(tower, start, end) {
       m.Tmin <= m.Tdaily && m.Tdaily <= m.Tmax && m.ea >= 0 && m.Pdaily > 0 && m.precip >= 0;
     byMonth[m.month] = {data:m,valid:valid};
   });
-  var segments=[], missing=[], current=null;
+  var segments=[], missing=[], rejected=[], current=null;
   var first = new Date(start.slice(0,7)+'-01T00:00:00Z'), last=end.slice(0,7);
   for(var d=first;d.toISOString().slice(0,7)<=last;d=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1))){
     var key=d.toISOString().slice(0,7), entry=byMonth[key];
     if(entry && entry.valid){if(!current){current=[];segments.push(current);}current.push(entry.data);}
-    else {missing.push(key);current=null;}
+    else {
+      missing.push(key);current=null;
+      var reasons=[],labels={ta:'temperature',sw:'shortwave',ea:'humidity',pa:'pressure',rain:'precipitation',rn:'net radiation'};
+      if(!entry)reasons.push('no weather records');
+      else {
+        counts.forEach(function(k){var n=entry.data.counts&&entry.data.counts[k];if(n!==entry.data.expected)reasons.push(labels[k]+': '+(carbonFinite(n)?n:0)+'/'+entry.data.expected+' valid intervals');});
+        if(!reasons.length)reasons.push('invalid monthly values or incomplete daily temperature extrema');
+      }
+      rejected.push(key+' — '+reasons.join('; '));
+    }
   }
-  return {segments:segments,missing:missing,byMonth:byMonth,source:tower.weather.source||{}};
+  return {segments:segments,missing:missing,rejected:rejected,byMonth:byMonth,source:tower.weather.source||{}};
 }
 function towerWeatherFeature(row, geom) {
   var d=ee.Date(row.month+'-01');
@@ -2818,7 +2827,10 @@ function onRun() {
       if(!runTower || !towerCoordinateMode || !carbonFinite(runTower.latitude) || !carbonFinite(runTower.longitude) || Math.abs(towerLat-runTower.latitude)>0.00001 || Math.abs(towerLon-runTower.longitude)>0.00001)
         throw new Error('Use the imported tower coordinates for a tower-weather run.');
       UI._runWeatherPlan=towerWeatherPlan(runTower,startDate,endDate);
-      if(!UI._runWeatherPlan.segments.length)throw new Error('No complete tower-weather months in the selected dates. Reprocess the CSV/ZIP and review weather fields and coverage.');
+      if(!UI._runWeatherPlan.segments.length){
+        UI.weatherNote.setValue('Tower weather unavailable:\n'+UI._runWeatherPlan.rejected.join('\n'));
+        throw new Error('No complete tower-weather months. '+UI._runWeatherPlan.rejected.slice(0,2).join(' | ')+'. See the weather note for all months.');
+      }
       UI.weatherNote.setValue('Tower weather selected. Unavailable months: '+(UI._runWeatherPlan.missing.join(', ')||'none')+'. Acclimation and soil-water calculations restart after gaps. CO2 and satellite vegetation remain unchanged. Supplied gap-filled fields are retained.');
     } else {UI.weatherNote.setValue('Gridded weather selected; tower weather is not used.');}
     UI.runButton.setDisabled(true);

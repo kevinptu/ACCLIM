@@ -19,7 +19,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js',...(process.env.ACCLIM_PRIVATE_S
  vm.runInContext('function carbonFinite(x){return typeof x==="number"&&isFinite(x);}\n'+s.slice(s.indexOf('function towerWeatherPlan('),s.indexOf('function setupTowerImport(')),ctx);
  let plan=ctx.towerWeatherPlan(d,'2024-01-01','2024-03-31');assert.equal(plan.segments.length,1);assert.equal(plan.missing.join(','),'2024-02,2024-03');assert.equal(ctx.towerAnnualTemperature(plan,2024).MAT,null);
  let separated={...d,weather:{...d.weather,months:[m,{...m,month:'2024-03'}]}};plan=ctx.towerWeatherPlan(separated,'2024-01-01','2024-03-31');assert.equal(plan.segments.length,2);assert.equal(plan.missing[0],'2024-02');
- plan=ctx.towerWeatherPlan(bad,'2024-01-01','2024-01-31');assert.equal(plan.segments.length,0);
+ plan=ctx.towerWeatherPlan(bad,'2024-01-01','2024-01-31');assert.equal(plan.segments.length,0);assert.ok(plan.rejected[0].includes('pressure: 1487/1488'));
  assert.throws(()=>ctx.towerWeatherPlan({version:3},'2024-01-01','2024-02-01'),/Reprocess/);
 
  // Incomplete monthly weather must remain missing in interpolated daily carbon.
