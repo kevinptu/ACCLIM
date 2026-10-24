@@ -15,7 +15,7 @@ el('archive').onchange=()=>{invalidate();el('settings').hidden=true;worker.postM
 el('settings').addEventListener('input',invalidate);
 el('metadata').onchange=async()=>{try{const f=el('metadata').files[0];if(!f)return;const meta=TowerCore.metadata({[f.name]:await f.text()},el('site').value.trim());coordinates(meta);setStatus(meta.sourceFiles.length?'Metadata matched.':'No matching snapshot row; enter metadata manually.');}catch(e){setStatus(e.message);}};
 el('prepare').onclick=()=>{try{invalidate();const metadata={};for(const k of ['site','citation','productId'])metadata[k]=el(k).value.trim();for(const k of ['latitude','longitude']){metadata[k]=el(k).value.trim()===''?null:Number(el(k).value);if(metadata[k]!==null&&(!Number.isFinite(metadata[k])||Math.abs(metadata[k])>(k==='latitude'?90:180)))throw Error('Invalid '+k);}el('prepare').disabled=true;setStatus('Calculating…');worker.postMessage({request,action:'parse',options:{variable:el('variable').value,secondVariable:el('second').value,radiation:el('radiation').value,metadata}});}catch(e){setStatus(e.message);el('prepare').disabled=false;}};
-el('copy').onclick=async()=>{try{await navigator.clipboard.writeText(el('result').value);setStatus('Copied. Paste into ACCLIM.');}catch(e){el('result').select();setStatus('Press Ctrl+C to copy.');}};
+el('copy').onclick=async()=>{try{await navigator.clipboard.writeText(el('result').value);setStatus('Copy requested. Paste into ACCLIM, then press Tab. If nothing appears, use Select text for Ctrl+C, press Ctrl+C, and paste again.');}catch(e){el('result').select();setStatus('Press Ctrl+C to copy.');}};
 el('download').onclick=()=>{if(!prepared)return;const url=URL.createObjectURL(new Blob([JSON.stringify(prepared)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download=prepared.site.replace(/[^\w-]/g,'_')+'_acclim.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 
 function updateTransfer(){
@@ -29,3 +29,5 @@ function updateTransfer(){
   catch(e){el('result').value='';el('copy').disabled=true;el('transferNote').textContent=e.message;}
 }
 el('transferStart').onchange=updateTransfer;el('transferEnd').onchange=updateTransfer;
+
+el('selectCopy').onclick=()=>{el('result').focus();el('result').select();setStatus('Text selected. Press Ctrl+C (Command+C on Mac), paste into ACCLIM, then press Tab before loading.');};
