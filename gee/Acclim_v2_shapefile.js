@@ -384,7 +384,7 @@ function fetchModisVI(geom, startDate, endDate, scale) {
     .filterDate(startPadded, endPadded)
     .filterBounds(geom);
 
-  return ic.map(function(img) {
+  var sampled = ic.map(function(img) {
     var d = ee.Date(img.get('system:time_start'));
     var s = img.select(['NDVI', 'sur_refl_b01', 'sur_refl_b02']).reduceRegion({
       reducer: ee.Reducer.mean(),
@@ -393,6 +393,12 @@ function fetchModisVI(geom, startDate, endDate, scale) {
       bestEffort: true,
       maxPixels: 1e10
     });
+    // Masked pixels reduce to null. Filter raw samples BEFORE any arithmetic.
+    return ee.Feature(geom, s).set({date: d.format('YYYY-MM-dd'), millis: d.millis()});
+  }).filter(ee.Filter.notNull(['NDVI', 'sur_refl_b01', 'sur_refl_b02']));
+
+  return sampled.map(function(sample) {
+    var s = ee.Feature(sample).toDictionary();
     var ndvi = ee.Number(s.get('NDVI')).divide(10000);
     var red  = ee.Number(s.get('sur_refl_b01')).divide(10000).max(0.0001);
     var nir  = ee.Number(s.get('sur_refl_b02')).divide(10000).max(0.0001);
@@ -401,8 +407,8 @@ function fetchModisVI(geom, startDate, endDate, scale) {
       .max(0).min(1);
 
     return ee.Feature(geom, {
-      date:   d.format('YYYY-MM-dd'),
-      millis: d.millis(),
+      date:   s.get('date'),
+      millis: s.get('millis'),
       NDVI:   ndvi,
       EVI2:   evi2,
       red:    red,
@@ -632,7 +638,8 @@ function assembleForcing(geom, startDate, endDate, config) {
     })
   );
 
-  return withDt;
+  // Do not fabricate vegetation values when the entire sampling window is masked.
+  return ee.FeatureCollection(ee.Algorithms.If(modis.size().gt(0), withDt, ee.FeatureCollection([])));
 }
 
 
@@ -2098,6 +2105,10 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
     if (requestId !== UI._requestId) return;
     UI.runButton.setDisabled(false);
     if (error) { setStatus('Carbon products could not be calculated: ' + error); return; }
+    if (!result.monthly || !result.monthly.length) {
+      setStatus('No usable forcing data for this location and date range. MODIS vegetation samples may all be masked. Check the coordinates or choose a different date range.');
+      return;
+    }
     try {
       var soilR2 = bucketR2(result.monthly, 'PredLEsday_mean', 'PredLEsday_RHVPD');
       var etR2 = bucketR2(result.monthly, 'PredLE_ETeffective', 'PredLE_ETreference');
