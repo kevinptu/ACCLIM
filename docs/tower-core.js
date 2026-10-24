@@ -1,6 +1,7 @@
 /* Shared browser/Node parser. Input files stay local; no network or storage calls. */
 (function(root) {
 'use strict';
+const weatherTools=typeof module!=='undefined'&&module.exports?require('./tower-weather.js'):root.TowerWeather;
 function* chunks(source){
   if(typeof source==='string'){yield source;return;}
   const decoder=new TextDecoder();for(let i=0;i<source.length;i+=65536)yield decoder.decode(source.subarray(i,i+65536),{stream:true});yield decoder.decode();
@@ -48,7 +49,7 @@ function inspect(text,name) {
   const meta=pre.join('\n');
   function coord(label,limit){const m=meta.match(new RegExp('Location '+label+':\\s*([-+]?\\d+(?:\\.\\d+)?)','i'));return m&&Math.abs(Number(m[1]))<=limit?Number(m[1]):null;}
   const site=meta.match(/Location Name:\s*([^\r\n]+)/i), id=String(name).match(/(?:^|_)([A-Z]{2}-[A-Za-z0-9]+)(?:_|\.)/);
-  return {header,variables,radiation,quanterra:header.includes('MIDPOINT_DATETIME'),site:site?site[1].trim():id?id[1]:name,latitude:coord('Latitude',90),longitude:coord('Longitude',180)};
+  return {weatherOptions:weatherTools.options(header),header,variables,radiation,quanterra:header.includes('MIDPOINT_DATETIME'),site:site?site[1].trim():id?id[1]:name,latitude:coord('Latitude',90),longitude:coord('Longitude',180)};
 }
 function metadata(files,site) {
   const result={site,latitude:null,longitude:null,citation:'',productId:'',sourceFiles:[]};
@@ -95,11 +96,12 @@ function parse(text,name,options={}) {
   if(!info.variables.includes(variable)||!info.radiation.includes(rad)||(other&&!info.variables.includes(other))||other===variable)throw Error('Selected fields are not available or duplicated.');
   const gi=h.indexOf(variable),ri=h.indexOf(rad),oi=h.indexOf(other),mi=h.indexOf('MIDPOINT_DATETIME'),si=h.indexOf('TIMESTAMP_START'),ei=h.indexOf('TIMESTAMP_END');
   const rqi=h.indexOf(rad+'_QC'),nqi=h.indexOf('NEE_VUT_REF_QC');
+  const weather=weatherTools.create(h,options.weather,rad,num,info.quanterra);
   const days={},seen=new Set();let started=false,units=false,previous=null,interval=null,validStart=null,validEnd=null;
   function bucket(t){const date=new Date(t).toISOString().slice(0,10);return days[date]||(days[date]={date,sum:0,n:0,secondSum:0,secondN:0,daylight:0,total:0,unknownLight:0,absent:0,radiationQC:{},neeQC:{}});}
   for(const row of csv(text)) {
     if(!started){if(row.map(v=>v.trim()).join('|')===h.join('|'))started=true;continue;}
-    if(info.quanterra&&!units){if(row[gi]!=='micromol/m2/s')throw Error('Expected micromol/m2/s GPP units.');units=true;continue;}
+    if(info.quanterra&&!units){if(row[gi]!=='micromol/m2/s')throw Error('Expected micromol/m2/s GPP units.');weather.checkUnits(row);units=true;continue;}
     if(row.every(v=>!v.trim()))continue;
     if(row.length!==h.length)throw Error('CSV row has a different number of columns than the header.');
     let t,dt;
@@ -111,7 +113,7 @@ function parse(text,name,options={}) {
     if(previous!==null&&!interval){const gap=t-previous;if(gap===1800000||gap===3600000)interval=gap;}
     if(previous!==null&&interval){const gap=t-previous;if(gap%interval!==0)throw Error('Timestamp cadence does not match interval length.');if(gap>interval){if(gap/interval>2000000)throw Error('Unreasonable timestamp gap.');for(let missing=previous+interval;missing<t;missing+=interval)bucket(missing).absent++;}}
     previous=t;
-    const d=bucket(t),g=num(row[gi]),sw=num(row[ri]),g2=other?num(row[oi]):NaN;d.total++;
+    const d=bucket(t),g=num(row[gi]),sw=num(row[ri]),g2=other?num(row[oi]):NaN;d.total++;weather.add(d.date,row);
     if(!Number.isFinite(sw)){d.unknownLight++;continue;}
     if(sw<=0)continue;
     d.daylight++;
@@ -124,6 +126,7 @@ function parse(text,name,options={}) {
   if(!validStart)throw Error('No valid daytime GPP in the selected field(s).');
   const meta=options.metadata||{};
   const result={version:3,site:meta.site||info.site,latitude:meta.latitude??info.latitude,longitude:meta.longitude??info.longitude,start:validStart,end:validEnd,units:'micromol/m2/s',filter:'INCOMING_SHORTWAVE_RADIATION > 0',gppVariable:variable,secondVariable:other,radiationVariable:rad,intervalMinutes:interval/60000,provenance:{filename:name,citation:meta.citation||'',productId:meta.productId||'',qualityNote:'All finite GPP retained, including gap-filled and negative values. NEE QC is not a direct GPP quality flag.'},daily:Object.values(days).sort((a,b)=>a.date.localeCompare(b.date))};
+  result.weather=weather.finish(interval);
   result.months=monthly(result,result.daily[0].date,result.daily.at(-1).date);return result;
 }
 function archiveList(bytes,zip) {
@@ -144,6 +147,7 @@ function archiveRead(bytes,name,zip) {
 function restoreSummary(text) {
   const d=JSON.parse(text);
   if(d.version!==3||d.units!=='micromol/m2/s'||d.filter!=='INCOMING_SHORTWAVE_RADIATION > 0'||!Array.isArray(d.daily)||!d.daily.length||d.daily.length>40000)throw Error('Select a saved version 3 ACCLIM summary JSON.');
+  if(d.weather&&(d.weather.version!==1||!Array.isArray(d.weather.months)))throw Error('Unsupported weather summary. Reprocess the source CSV/ZIP.');
   const seen=new Set();
   for(const r of d.daily){
     if(!/^\d{4}-\d{2}-\d{2}$/.test(r.date)||!Number.isFinite(Date.parse(r.date))||new Date(r.date).toISOString().slice(0,10)!==r.date||seen.has(r.date))throw Error('Invalid or duplicate summary date.');
@@ -162,6 +166,7 @@ function transferSummary(data,start,end){
   const daily=data.daily.filter(r=>r.date>=start&&r.date<=end).map(r=>Object.fromEntries(['date','sum','n','secondSum','secondN','daylight','total','unknownLight','absent'].map(k=>[k,r[k]])));
   if(!daily.some(r=>r.n||r.secondN))throw Error('No valid daytime GPP in the selected date range.');
   const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance'])out[k]=data[k];
+  if(data.weather)out.weather={...data.weather,months:data.weather.months.filter(m=>m.month>=start.slice(0,7)&&m.month<=end.slice(0,7))};
   out.daily=daily;out.start=start;out.end=end;return out;
 }
 const api={restoreSummary,transferSummary,csv,num,timestamp,inspect,metadata,monthly,parse,archiveList,fluxFiles,archiveRead};

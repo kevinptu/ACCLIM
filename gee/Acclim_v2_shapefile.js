@@ -542,14 +542,15 @@ function assembleForcing(geom, startDate, endDate, config) {
 
   // Filter TerraClimate to the requested window (TC features land on the
   // first of each month, so this gives one feature per month).
-  var terra = fetchTerraClimate(geom, startDate, endDate, scale)
+  var towerRows = config.towerWeatherRows;
+  var terra = (towerRows ? ee.FeatureCollection(towerRows.map(function(row){return towerWeatherFeature(row,geom);})) : fetchTerraClimate(geom, startDate, endDate, scale))
     .filter(ee.Filter.and(
       ee.Filter.gte('millis', ee.Date(startDate).millis()),
       ee.Filter.lte('millis', ee.Date(endDate).millis())
     ))
     .sort('millis');
 
-  var modis = fetchModisVI(geom, startDate, endDate, scale);
+  var modis = config.modis || fetchModisVI(geom, startDate, endDate, scale);
 
   // For each TerraClimate month, aggregate MODIS and compute derived fields.
   var enriched = terra.map(function(f) {
@@ -567,7 +568,7 @@ function assembleForcing(geom, startDate, endDate, config) {
     var dl  = astronomicalDaylength(latDeg, doy);
 
     // Temperatures (per R script)
-    var Tdaily = Tmin.add(Tmax).divide(2);
+    var Tdaily = towerRows ? f.getNumber('Tdaily') : Tmin.add(Tmax).divide(2);
     var Tday   = Tmax.add(Tmax.add(Tmin).multiply(0.5)).divide(2);
 
     // Saturation VPs and VPD (using observed ea, not derived from dewpoint)
@@ -599,7 +600,9 @@ function assembleForcing(geom, startDate, endDate, config) {
     var Rndaily = ee.Number(1).subtract(albedo).multiply(SWRdaily)
       .add(T_K4.multiply(p.sb).multiply(em_air.subtract(em_sur)));
 
+    if (towerRows) Rndaily = f.getNumber('Rndaily');
     return f.set({
+      weather_source: towerRows ? 'tower' : 'gridded',
       doy:       doy,
       daylength: dl,
       Tdaily:    Tdaily,
@@ -614,7 +617,7 @@ function assembleForcing(geom, startDate, endDate, config) {
       greencover: greencover,
       Rndaily:   Rndaily,
       // MVP constants
-      Pdaily:    MVP_CONSTANTS.Pdaily,
+      Pdaily:    towerRows ? f.getNumber('Pdaily') : MVP_CONSTANTS.Pdaily,
       ca_daily:  co2ForDate(monthStart)
     });
   });
@@ -687,9 +690,11 @@ function computeInitialState(forcingList, params) {
     var esTmin = magnusVP(Tmin);
     var esTmax = magnusVP(Tmax);
     var esTday = magnusVP(Tday);
-    var VPDmax = esTmax.subtract(esTmin);
-    var VPDday = esTday.subtract(esTmin);
-    var RHmin = esTmin.divide(esTmax).max(0).min(1);
+    var useTowerHumidity = ee.Algorithms.IsEqual(f.get('weather_source'), 'tower');
+    var humidityPressure = ee.Number(ee.Algorithms.If(useTowerHumidity, f.get('ea'), esTmin));
+    var VPDmax = ee.Number(ee.Algorithms.If(useTowerHumidity, esTmax.subtract(humidityPressure).max(0), esTmax.subtract(esTmin)));
+    var VPDday = ee.Number(ee.Algorithms.If(useTowerHumidity, esTday.subtract(humidityPressure).max(0), esTday.subtract(esTmin)));
+    var RHmin = humidityPressure.divide(esTmax).max(0).min(1);
     var Rnday = f.getNumber('Rndaily').multiply(ee.Number(24).divide(dl));
     return f.set({
       Tday: Tday,
@@ -976,8 +981,10 @@ function acclimStep(currentFeat, prevState, params) {
   var esTmin = magnusVP(Tmin);
   var esTmax = magnusVP(Tmax);
   var esTday = magnusVP(Tday);
-  var VPDmax = esTmax.subtract(esTmin);
-  var VPDday = esTday.subtract(esTmin);
+  var useTowerHumidity = ee.Algorithms.IsEqual(f.get('weather_source'), 'tower');
+  var humidityPressure = ee.Number(ee.Algorithms.If(useTowerHumidity, f.get('ea'), esTmin));
+  var VPDmax = ee.Number(ee.Algorithms.If(useTowerHumidity, esTmax.subtract(humidityPressure).max(0), esTmax.subtract(esTmin)));
+  var VPDday = ee.Number(ee.Algorithms.If(useTowerHumidity, esTday.subtract(humidityPressure).max(0), esTday.subtract(esTmin)));
 
   // PARday (umol/m2/s) = 2.2 * SWR(W/m2) * (24/dl)
   var PARday = SWRdaily.multiply(2.2).multiply(ee.Number(24).divide(dl));
@@ -986,7 +993,7 @@ function acclimStep(currentFeat, prevState, params) {
   var Rnday = Rndaily.multiply(ee.Number(24).divide(dl));
 
   // RHmin (fraction)
-  var RHmin = esTmin.divide(esTmax).max(0).min(1);
+  var RHmin = humidityPressure.divide(esTmax).max(0).min(1);
 
   // dt and w. dt is supplied by the forcing FC (days since previous timestep),
   // so the model is cadence-agnostic — daily, 16-day, monthly all work.
@@ -1046,6 +1053,8 @@ function acclimStep(currentFeat, prevState, params) {
     millis: f.getNumber('millis'),
     doy: doy,
     // Forcings (carried through for reference)
+    weather_source: f.get('weather_source'), weather_status: f.get('weather_status'),
+    weather_expected_intervals: f.get('weather_expected_intervals'), ea: f.get('ea'),
     Tmin: Tmin, Tmax: Tmax, Tdaily: Tdaily, Tday: Tday,
     SWRdaily: SWRdaily, Pdaily: Pdaily, Rndaily: Rndaily,
     precip: f.get('precip'), period_days: f.get('period_days'),
@@ -1470,7 +1479,7 @@ function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
   if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2') throw new Error('Unknown FAPAR method.');
-  if (p.faparMethod === 'EVI2') p.faparFit = fitEVI2FAPAR(forcingFC);
+  if (p.faparMethod === 'EVI2' && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC);
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   var forcingList = forcingFC.sort('millis').toList(forcingFC.size());
   var initial = computeInitialState(forcingList, p);
@@ -1637,6 +1646,29 @@ function attachLandsatLST(output, geom, start, end) {
 }
 
 function runForGeometry(geom, startDate, endDate, paramOverrides, config) {
+  config = config || {};
+  if (config.weatherPlan) {
+    // Use the same full-window vegetation samples and FAPAR fit in both weather modes.
+    var firstTowerMonth=ee.Date(startDate.slice(0,7)+'-01');
+    var towerEnd=ee.Date(endDate.slice(0,7)+'-01').advance(1,'month');
+    var fullModis=fetchModisVI(geom,firstTowerMonth,towerEnd.advance(-1,'day'),config.scale||DEFAULTS.sampleScale);
+    var allVI=ee.FeatureCollection(ee.Algorithms.If(fullModis.size().gt(0),
+      ee.FeatureCollection(ee.List.sequence(0,towerEnd.difference(firstTowerMonth,'month').subtract(1)).map(function(i){
+        var month=firstTowerMonth.advance(i,'month');return aggregateModisToMonth(fullModis,month,month.advance(1,'month'));
+      })),ee.FeatureCollection([])));
+    var groups=[];
+    config.weatherPlan.segments.forEach(function(rows){
+      var forcing=assembleForcing(geom,rows[0].month+'-01',ee.Date(rows[rows.length-1].month+'-01').advance(1,'month').advance(-1,'day'),{towerWeatherRows:rows,modis:fullModis,scale:config.scale});
+      groups.push(forcing);
+    });
+    var overrides=mergeParams(paramOverrides||{},{});
+    if(overrides.faparMethod==='EVI2')overrides.faparFit=fitEVI2FAPAR(allVI);
+    var result=ee.FeatureCollection([]);
+    groups.forEach(function(forcing){result=result.merge(ee.FeatureCollection(ee.Algorithms.If(forcing.size().gt(0),runACCLIM(forcing,overrides),ee.FeatureCollection([]))));});
+    var missing=ee.FeatureCollection(config.weatherPlan.missing.map(function(month){return ee.Feature(geom,{date:month+'-01',millis:ee.Date(month+'-01').millis(),weather_source:'tower',weather_status:'missing_weather'});}));
+    return result.merge(missing).sort('millis').map(function(f){return f.set('weather_fields',JSON.stringify(config.weatherPlan.source));});
+  }
+
   // Include every month intersecting the inclusive requested date range.
   // This prevents mid-month requests from losing their first month's forcing.
   var firstMonth = ee.Date(ee.Date(startDate).format('YYYY-MM-01'));
@@ -1806,7 +1838,7 @@ function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overri
     var d = new Date(ms);
     var valid = carbonFinite(r.PredGPPmean) && r.PredGPPmean >= 0 &&
       carbonFinite(r.daylength) && r.daylength >= 0 && r.daylength <= 24;
-    monthly[key] = { anchor: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 16),
+    monthly[key] = { weather_source:r.weather_source || 'gridded', anchor: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 16),
       gpp: valid ? r.PredGPPmean * r.daylength * 3600 * CARBON_UNITS.gramsCPerMol / 1e6 : null };
   });
   var daily = [], windows = {}, periods = [];
@@ -1832,7 +1864,7 @@ function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overri
       npp * a.herbaceousNPPFraction * a.fANPP * p.carbonToBiomass * conversion : null;
     var row = mergeParams(a, {
       date: carbonDateString(ms), millis: ms, 'system:time_start': ms,
-      year: year, GPPdaily: gpp, NPPdaily: npp, CUEplant: p.CUEplant,
+      year: year, weather_source:current ? current.weather_source : null, GPPdaily: gpp, NPPdaily: npp, CUEplant: p.CUEplant,
       // Total (above + belowground) PFT NPP; cover allocation needs no MAT.
       NPPgrass: carbonFinite(npp) && carbonFinite(a.herbaceousNPPFraction) ? npp * a.herbaceousNPPFraction : null,
       NPPshrub: carbonFinite(npp) && carbonFinite(a.shrubNPPFraction) ? npp * a.shrubNPPFraction : null,
@@ -1939,6 +1971,10 @@ function fetchCarbonAnnualContext(geom, startDate, endDate, config) {
       .select(['AFG', 'PFG', 'SHR', 'TRE']).reduceRegion({
         reducer: ee.Reducer.mean(), geometry: geom, scale: 30, maxPixels: 1e10, tileScale: 4
       });
+    if (config.weatherPlan) {
+      rows.push(ee.Feature(null,cover.combine(ee.Dictionary(towerAnnualTemperature(config.weatherPlan,y))).combine(ee.Dictionary({year:y,coverImages:coverIC.size()}))));
+      continue;
+    }
     var temperature = ee.ImageCollection(DATASETS.TERRACLIMATE).filterDate(yearStart, yearEnd)
       .map(function(img) {
         return img.select('tmmn').add(img.select('tmmx')).multiply(0.05).rename('MAT');
@@ -2098,7 +2134,7 @@ function loadCarbonProducts(output, geom, start, end, requestId, regionName, c4C
   try { fetchSoilGridsSand(geom).evaluate(ready); } catch (error) { ready(null, error); }
 }
 function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, sandPercent, c4Chart) {
-  var context = fetchCarbonAnnualContext(geom, start, end);
+  var context = fetchCarbonAnnualContext(geom, start, end, {weatherPlan:UI._runWeatherPlan});
   var monthlyProperties = output.toList(output.size()).map(function(f) { return ee.Feature(f).toDictionary(); });
   var annualProperties = context.toList(context.size()).map(function(f) { return ee.Feature(f).toDictionary(); });
   ee.Dictionary({monthly: monthlyProperties, annual: annualProperties}).evaluate(function(result, error) {
@@ -2123,8 +2159,9 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       output = carbonRowsToFC(result.monthly);
       UI._lastOutput = output; // monthly CSV includes AWC and ET, E, and T source depths
       var bucketInfo = {};
-      if (result.monthly.length) Object.keys(result.monthly[0]).forEach(function(key) {
-        bucketInfo[key] = result.monthly[0][key];
+      var bucketRow=result.monthly.filter(function(r){return carbonFinite(r.PredGPPmean);})[0];
+      if (bucketRow) Object.keys(bucketRow).forEach(function(key) {
+        bucketInfo[key] = bucketRow[key];
       });
       var selectedPeriodDepth = transpirationSourceDepth(result.monthly);
       Object.keys(selectedPeriodDepth).forEach(function(key) {
@@ -2470,6 +2507,54 @@ function towerMonthsInRange(tower, start, end) {
   });
   return months;
 }
+// Validate imported monthly weather independently of the summary's complete flag.
+function towerWeatherPlan(tower, start, end) {
+  if (!tower || !tower.weather || tower.weather.version !== 1)
+    throw new Error('Reprocess the original tower CSV/ZIP with the updated importer to include weather.');
+  var seen = {}, byMonth = {}, fields = ['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip','Rndaily'];
+  var counts = ['ta','sw','ea','pa','rain','rn'];
+  if (!Array.isArray(tower.weather.months)) throw new Error('Invalid tower weather summary.');
+  tower.weather.months.forEach(function(m) {
+    if (!/^\d{4}-\d{2}$/.test(m.month) || seen[m.month]) throw new Error('Invalid or duplicate weather month.');
+    var date = new Date(m.month + '-01T00:00:00Z');
+    if (!isFinite(date.getTime()) || date.toISOString().slice(0,7) !== m.month) throw new Error('Invalid weather month.');
+    seen[m.month] = true;
+    var days = new Date(Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+1,0)).getUTCDate();
+    var interval = tower.intervalMinutes;
+    if (interval !== 30 && interval !== 60) throw new Error('Unsupported weather interval.');
+    var expected = days*1440/interval;
+    var valid = m.complete === true && m.expected === expected && fields.every(function(k){return carbonFinite(m[k]);}) &&
+      counts.every(function(k){return m.counts && m.counts[k] === expected;}) &&
+      m.Tmin <= m.Tdaily && m.Tdaily <= m.Tmax && m.ea >= 0 && m.Pdaily > 0 && m.precip >= 0;
+    byMonth[m.month] = {data:m,valid:valid};
+  });
+  var segments=[], missing=[], current=null;
+  var first = new Date(start.slice(0,7)+'-01T00:00:00Z'), last=end.slice(0,7);
+  for(var d=first;d.toISOString().slice(0,7)<=last;d=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1))){
+    var key=d.toISOString().slice(0,7), entry=byMonth[key];
+    if(entry && entry.valid){if(!current){current=[];segments.push(current);}current.push(entry.data);}
+    else {missing.push(key);current=null;}
+  }
+  return {segments:segments,missing:missing,byMonth:byMonth,source:tower.weather.source||{}};
+}
+function towerWeatherFeature(row, geom) {
+  var d=ee.Date(row.month+'-01');
+  return ee.Feature(geom,{date:row.month+'-01',millis:d.millis(),year:d.get('year'),month:d.get('month'),
+    Tmin:row.Tmin,Tmax:row.Tmax,Tdaily:row.Tdaily,SWRdaily:row.SWRdaily,ea:row.ea,
+    Pdaily:row.Pdaily,precip:row.precip,Rndaily:row.Rndaily,period_days:d.advance(1,'month').difference(d,'day'),
+    weather_source:'tower',weather_status:'complete',weather_expected_intervals:row.expected});
+}
+function towerAnnualTemperature(plan, year) {
+  var sum=0,days=0,count=0;
+  for(var m=1;m<=12;m++){
+    var key=year+'-'+(m<10?'0':'')+m, entry=plan.byMonth[key], row=entry&&entry.data;
+    if(row && carbonFinite(row.Tdaily) && row.counts && row.counts.ta===row.expected){
+      var n=new Date(Date.UTC(year,m,0)).getUTCDate();sum+=row.Tdaily*n;days+=n;count++;
+    }
+  }
+  return {MAT:count===12?sum/days:null,temperatureMonths:count,MAT_source:'tower'};
+}
+
 function setupTowerImport() {
   UI.inputPanel.add(ui.Label({value: 'Open flux tower CSV importer',
     targetUrl: 'https://kevinptu.github.io/ACCLIM/tower-csv-importer.html', style: {color: '#1565C0'}}));
@@ -2494,6 +2579,10 @@ function setupTowerImport() {
   UI.inputPanel.add(ui.Button({label:'Load with current settings', onClick:function(){load(false);}}));
   UI.inputPanel.add(ui.Button({label:'Clear tower import',onClick:function(){UI._towerData=null;UI.towerInput.setValue('');UI.towerNote.setValue('Tower import cleared. Run again to update the chart.');}}));
   UI.inputPanel.add(UI.towerNote);
+  UI.useTowerWeather=ui.Checkbox({label:'Use Tower Weather Data',value:false});
+  UI.inputPanel.add(UI.useTowerWeather);
+  UI.weatherNote=ui.Label({value:'Optional: tower temperature, humidity, shortwave, pressure, precipitation and net radiation. Complete months only; no gridded substitutions. CO2 and satellite vegetation remain unchanged.',style:{whiteSpace:'pre-wrap'}});
+  UI.inputPanel.add(UI.weatherNote);
 }
 function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
   var note=ui.Label({value:'Import tower data in the inputs before running ACCLIM.',style:{whiteSpace:'pre-wrap'}});
@@ -2724,6 +2813,14 @@ function onRun() {
   try {
     if (carbonDateMillis(endDate) < carbonDateMillis(startDate))
       throw new Error('End date must be on or after start date.');
+    UI._runWeatherPlan=null;
+    if(UI.useTowerWeather.getValue()) {
+      if(!runTower || !towerCoordinateMode || !carbonFinite(runTower.latitude) || !carbonFinite(runTower.longitude) || Math.abs(towerLat-runTower.latitude)>0.00001 || Math.abs(towerLon-runTower.longitude)>0.00001)
+        throw new Error('Use the imported tower coordinates for a tower-weather run.');
+      UI._runWeatherPlan=towerWeatherPlan(runTower,startDate,endDate);
+      if(!UI._runWeatherPlan.segments.length)throw new Error('No complete tower-weather months in the selected dates. Reprocess the CSV/ZIP and review weather fields and coverage.');
+      UI.weatherNote.setValue('Tower weather selected. Unavailable months: '+(UI._runWeatherPlan.missing.join(', ')||'none')+'. Acclimation and soil-water calculations restart after gaps. CO2 and satellite vegetation remain unchanged. Supplied gap-filled fields are retained.');
+    } else {UI.weatherNote.setValue('Gridded weather selected; tower weather is not used.');}
     UI.runButton.setDisabled(true);
     var runRequestId = UI._requestId;
     resolveGeometryName(geom, function(regionName, locationError) {
@@ -2734,10 +2831,11 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {faparMethod: UI.faparSelector.getValue()});
+    var output = runForGeometry(geom, startDate, endDate, {faparMethod: UI.faparSelector.getValue()}, {weatherPlan:UI._runWeatherPlan});
     UI._lastOutput = output;
-    UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName};
+    UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
 
+    regionName += UI._runWeatherPlan ? '\nTower weather' : '\nGridded weather';
     // Center the map on the active geometry so the user sees where they ran.
     if (UI.map) UI.map.centerObject(geom);
 
