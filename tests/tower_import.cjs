@@ -31,6 +31,14 @@ for(const file of ['tower-core.js','tower-worker.js','tower-ui.js'])new vm.Scrip
 for(const scriptPath of [__dirname+'/../gee/Acclim_v2_shapefile.js',...(process.env.ACCLIM_PRIVATE_SCRIPT?[process.env.ACCLIM_PRIVATE_SCRIPT]:[])]){
  const script=fs.readFileSync(scriptPath,'utf8');new vm.Script(script);
  const ctx={};vm.createContext(ctx);vm.runInContext('function carbonFinite(x){return typeof x==="number"&&isFinite(x);}\n'+script.slice(script.indexOf('function parseTowerMonthly('),script.indexOf('function setupTowerImport(')),ctx);
+ const restored=core.restoreSummary(JSON.stringify(data));
+ const compact=core.transferSummary(restored,'2024-01-01','2024-01-31');
+ const compactParsed=ctx.parseTowerMonthly(JSON.stringify(compact));
+ assert.equal(ctx.towerMonthsInRange(compactParsed,'2024-01-01','2024-01-31')['2024-01'].gpp,4);
+ assert.ok(compact.daily.every(r=>r.date<'2024-02-01'));
+ assert.ok(!('months' in compact));assert.ok(!('neeQC' in compact.daily[0]));
+ assert.throws(()=>core.restoreSummary(JSON.stringify({...data,daily:[data.daily[0],data.daily[0]]})),/duplicate/);
+ assert.throws(()=>core.transferSummary(restored,'2099-01-01','2099-01-31'),/No valid/);
  const parsed=ctx.parseTowerMonthly(JSON.stringify(data)),m=ctx.towerMonthsInRange(parsed,'2024-01-01','2024-02-01');assert.equal(m['2024-01'].gpp,4);assert.equal(m['2024-01'].secondGpp,1);assert.equal(m['2024-02'].missingPct,50);
  const old={version:2,site:'test',latitude:null,longitude:null,units:'micromol/m2/s',filter:'INCOMING_SHORTWAVE_RADIATION > 0',daily:[{date:'2024-01-01',sum:4,n:2}]};assert.equal(ctx.parseTowerMonthly(JSON.stringify(old)).start,'2024-01-01');
  assert.throws(()=>ctx.parseTowerMonthly(JSON.stringify({...data,daily:[{...data.daily[0],n:9999}]})),/coverage/);

@@ -141,6 +141,29 @@ function archiveRead(bytes,name,zip) {
   for(const [key,value] of Object.entries(extracted)){if(key===name)text=value;else files[key]=decoder.decode(value);}
   return {text,files};
 }
-const api={csv,num,timestamp,inspect,metadata,monthly,parse,archiveList,fluxFiles,archiveRead};
+function restoreSummary(text) {
+  const d=JSON.parse(text);
+  if(d.version!==3||d.units!=='micromol/m2/s'||d.filter!=='INCOMING_SHORTWAVE_RADIATION > 0'||!Array.isArray(d.daily)||!d.daily.length||d.daily.length>40000)throw Error('Select a saved version 3 ACCLIM summary JSON.');
+  const seen=new Set();
+  for(const r of d.daily){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(r.date)||!Number.isFinite(Date.parse(r.date))||new Date(r.date).toISOString().slice(0,10)!==r.date||seen.has(r.date))throw Error('Invalid or duplicate summary date.');
+    seen.add(r.date);
+    for(const k of ['n','secondN','daylight','total','unknownLight','absent'])if(!Number.isInteger(r[k])||r[k]<0)throw Error('Invalid summary coverage.');
+    if(!Number.isFinite(r.sum)||!Number.isFinite(r.secondSum)||r.n>r.daylight||r.secondN>r.daylight||r.daylight+r.unknownLight>r.total||(!r.n&&r.sum!==0)||(!r.secondN&&r.secondSum!==0))throw Error('Inconsistent summary coverage.');
+  }
+  for(const [k,limit] of [['latitude',90],['longitude',180]])if(d[k]!==null&&(!Number.isFinite(d[k])||Math.abs(d[k])>limit))throw Error('Invalid '+k);
+  d.daily.sort((a,b)=>a.date.localeCompare(b.date));
+  const valid=d.daily.filter(r=>r.n||r.secondN);if(!valid.length)throw Error('No valid daytime GPP.');
+  d.site=String(d.site||'Tower');d.start=valid[0].date;d.end=valid.at(-1).date;
+  d.months=monthly(d,d.daily[0].date,d.daily.at(-1).date);return d;
+}
+function transferSummary(data,start,end){
+  if(!start||!end||start>end)throw Error('Choose a valid comparison date range.');
+  const daily=data.daily.filter(r=>r.date>=start&&r.date<=end).map(r=>Object.fromEntries(['date','sum','n','secondSum','secondN','daylight','total','unknownLight','absent'].map(k=>[k,r[k]])));
+  if(!daily.some(r=>r.n||r.secondN))throw Error('No valid daytime GPP in the selected date range.');
+  const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance'])out[k]=data[k];
+  out.daily=daily;out.start=start;out.end=end;return out;
+}
+const api={restoreSummary,transferSummary,csv,num,timestamp,inspect,metadata,monthly,parse,archiveList,fluxFiles,archiveRead};
 if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TowerCore=api;
 })(typeof self!=='undefined'?self:globalThis);

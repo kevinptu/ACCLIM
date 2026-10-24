@@ -46,3 +46,7 @@ Public/private Earth Engine scripts accept version 3 summaries and older version
 ZIP decoding uses vendored fflate 0.8.2 under its accompanying MIT license.
 
 Validation data citation: Siyan Ma, Liukang Xu, Joseph Verfaillie, Dennis Baldocchi (2026), AmeriFlux FLUXNET-1F US-Var Vaira Ranch- Ione, Ver. v1.3_r1 (2000–2025), AmeriFlux AMP. https://doi.org/10.17190/AMF/1993904. Funding for the AmeriFlux data service was provided by the U.S. Department of Energy Office of Science. FLUXNET data products were produced and harmonized by eddy covariance regional networks and data processing centers, including AmeriFlux, ChinaFlux, European Fluxes Database, ICOS, JapanFlux, KoFlux, OzFlux, SAEON, and TERN. These products also include a modified version of ERA5 hourly data provided by the Copernicus Climate Change Service.
+
+### Reopen saved summaries and reduce paste size
+
+Choose a saved version 3 ACCLIM summary `.json` using the importer Data file control. The importer restores the comparison and recomputes its monthly preview without the original CSV or ZIP. Save summary JSON keeps the full record and quality details. Copy ACCLIM data omits redundant monthly previews and QC histograms, while preserving daily sums and coverage counts. Use Copy from / Copy through to restrict the copied date range if a long record makes the Earth Engine text box slow. The preview and saved JSON still cover the full record. Existing GEE scripts accept this smaller version 3 payload; no app republication is needed for this change.
