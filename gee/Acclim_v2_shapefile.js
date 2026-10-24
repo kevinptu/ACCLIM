@@ -1054,7 +1054,7 @@ function acclimStep(currentFeat, prevState, params) {
     doy: doy,
     // Forcings (carried through for reference)
     weather_source: f.get('weather_source'), weather_status: f.get('weather_status'),
-    weather_expected_intervals: f.get('weather_expected_intervals'), ea: f.get('ea'),
+    weather_energy_basis: f.get('weather_energy_basis'), weather_expected_intervals: f.get('weather_expected_intervals'), ea: f.get('ea'),
     Tmin: Tmin, Tmax: Tmax, Tdaily: Tdaily, Tday: Tday,
     SWRdaily: SWRdaily, Pdaily: Pdaily, Rndaily: Rndaily,
     precip: f.get('precip'), period_days: f.get('period_days'),
@@ -2509,8 +2509,8 @@ function towerMonthsInRange(tower, start, end) {
 }
 // Validate imported monthly weather independently of the summary's complete flag.
 function towerWeatherPlan(tower, start, end) {
-  if (!tower || !tower.weather || tower.weather.version !== 1)
-    throw new Error('Reprocess the original tower CSV/ZIP with the updated importer to include weather.');
+  if (!tower || !tower.weather || tower.weather.version !== 2)
+    throw new Error('Reprocess the original tower CSV/ZIP with the updated importer to include P_F, PA_F and LE_CORR + H_CORR weather inputs.');
   var seen = {}, byMonth = {}, fields = ['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip','Rndaily'];
   var counts = ['ta','sw','ea','pa','rain','rn'];
   if (!Array.isArray(tower.weather.months)) throw new Error('Invalid tower weather summary.');
@@ -2535,7 +2535,7 @@ function towerWeatherPlan(tower, start, end) {
     if(entry && entry.valid){if(!current){current=[];segments.push(current);}current.push(entry.data);}
     else {
       missing.push(key);current=null;
-      var reasons=[],labels={ta:'temperature',sw:'shortwave',ea:'humidity',pa:'pressure',rain:'precipitation',rn:'net radiation'};
+      var reasons=[],labels={ta:'temperature',sw:'shortwave',ea:'humidity',pa:'pressure',rain:'precipitation',rn:'LE_CORR + H_CORR'};
       if(!entry)reasons.push('no weather records');
       else {
         counts.forEach(function(k){var n=entry.data.counts&&entry.data.counts[k];if(n!==entry.data.expected)reasons.push(labels[k]+': '+(carbonFinite(n)?n:0)+'/'+entry.data.expected+' valid intervals');});
@@ -2551,7 +2551,7 @@ function towerWeatherFeature(row, geom) {
   return ee.Feature(geom,{date:row.month+'-01',millis:d.millis(),year:d.get('year'),month:d.get('month'),
     Tmin:row.Tmin,Tmax:row.Tmax,Tdaily:row.Tdaily,SWRdaily:row.SWRdaily,ea:row.ea,
     Pdaily:row.Pdaily,precip:row.precip,Rndaily:row.Rndaily,period_days:d.advance(1,'month').difference(d,'day'),
-    weather_source:'tower',weather_status:'complete',weather_expected_intervals:row.expected});
+    weather_source:'tower',weather_energy_basis:'LE_CORR + H_CORR',weather_status:'complete',weather_expected_intervals:row.expected});
 }
 function towerAnnualTemperature(plan, year) {
   var sum=0,days=0,count=0;
@@ -2590,7 +2590,7 @@ function setupTowerImport() {
   UI.inputPanel.add(UI.towerNote);
   UI.useTowerWeather=ui.Checkbox({label:'Use Tower Weather Data',value:false});
   UI.inputPanel.add(UI.useTowerWeather);
-  UI.weatherNote=ui.Label({value:'Optional: tower temperature, humidity, shortwave, pressure, precipitation and net radiation. Complete months only; no gridded substitutions. CO2 and satellite vegetation remain unchanged.',style:{whiteSpace:'pre-wrap'}});
+  UI.weatherNote=ui.Label({value:'Optional: tower temperature, humidity, shortwave, pressure, precipitation and LE_CORR + H_CORR. Complete months only; no gridded substitutions. CO2 and satellite vegetation remain unchanged.',style:{whiteSpace:'pre-wrap'}});
   UI.inputPanel.add(UI.weatherNote);
 }
 function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {

@@ -147,7 +147,7 @@ function archiveRead(bytes,name,zip) {
 function restoreSummary(text) {
   const d=JSON.parse(text);
   if(d.version!==3||d.units!=='micromol/m2/s'||d.filter!=='INCOMING_SHORTWAVE_RADIATION > 0'||!Array.isArray(d.daily)||!d.daily.length||d.daily.length>40000)throw Error('Select a saved version 3 ACCLIM summary JSON.');
-  if(d.weather&&(d.weather.version!==1||!Array.isArray(d.weather.months)))throw Error('Unsupported weather summary. Reprocess the source CSV/ZIP.');
+  if(d.weather&&((d.weather.version!==1&&d.weather.version!==2)||!Array.isArray(d.weather.months)))throw Error('Unsupported weather summary. Reprocess the source CSV/ZIP.');
   const seen=new Set();
   for(const r of d.daily){
     if(!/^\d{4}-\d{2}-\d{2}$/.test(r.date)||!Number.isFinite(Date.parse(r.date))||new Date(r.date).toISOString().slice(0,10)!==r.date||seen.has(r.date))throw Error('Invalid or duplicate summary date.');

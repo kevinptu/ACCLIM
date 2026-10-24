@@ -1,13 +1,14 @@
 const assert=require('assert/strict'),fs=require('fs'),vm=require('vm');
 const core=require('../docs/tower-core.js');
-const header='TIMESTAMP_START,TIMESTAMP_END,GPP_NT_VUT_REF,SW_IN_F,TA_F,VPD_F,PA_F,P_F,NETRAD';
+const header='TIMESTAMP_START,TIMESTAMP_END,GPP_NT_VUT_REF,SW_IN_F,TA_F,VPD_F,PA_F,P_F,NETRAD,LE_CORR,H_CORR,PA,P';
 const stamp=ms=>new Date(ms).toISOString().replace(/[-:T]/g,'').slice(0,12);
 let rows=[];const first=Date.UTC(2024,0,1),last=Date.UTC(2024,1,1);
-for(let t=first;t<last;t+=1800000){let hour=new Date(t).getUTCHours(),day=hour>=6&&hour<18;rows.push([stamp(t),stamp(t+1800000),day?10:0,day?200:0,day?20:10,10,90,0.1,day?150:-50].join(','));}
+for(let t=first;t<last;t+=1800000){let hour=new Date(t).getUTCHours(),day=hour>=6&&hour<18;rows.push([stamp(t),stamp(t+1800000),day?10:0,day?200:0,day?20:10,10,90,0.1,9999,day?100:-30,day?50:-20,80,0].join(','));}
 const text=header+'\n'+rows.join('\n'),name='FLX_US-Test_FULLSET_HH_2024.csv';
 const d=core.parse(text,name),m=d.weather.months[0];
-assert.equal(m.complete,true);assert.equal(m.Tmin,10);assert.equal(m.Tmax,20);assert.equal(m.Tdaily,15);assert.equal(m.SWRdaily,100);assert.equal(m.Rndaily,50);assert.equal(m.Pdaily,90);assert.ok(Math.abs(m.precip-148.8)<1e-8);
+assert.equal(m.complete,true);assert.equal(d.weather.source.pa,'PA_F');assert.equal(d.weather.source.rain,'P_F');assert.equal(d.weather.version,2);assert.equal(m.Tmin,10);assert.equal(m.Tmax,20);assert.equal(m.Tdaily,15);assert.equal(m.SWRdaily,100);assert.equal(m.Rndaily,50);assert.equal(m.Pdaily,90);assert.ok(Math.abs(m.precip-148.8)<1e-8);
 const es=t=>0.61121*Math.exp(17.502*t/(t+240.97));assert.ok(Math.abs(m.ea-((es(20)+es(10))/2-1))<1e-12);assert.equal(d.months[0].gpp,10);
+let fluxMissing=rows.slice();let cells=fluxMissing[0].split(',');cells[9]='-9999';fluxMissing[0]=cells.join(',');const fluxBad=core.parse(header+'\n'+fluxMissing.join('\n'),name);assert.equal(fluxBad.weather.months[0].counts.rn,1487);assert.equal(fluxBad.weather.months[0].Rndaily,null);
 let missing=rows.slice();missing[0]=missing[0].replace(',90,',',-9999,');let bad=core.parse(header+'\n'+missing.join('\n'),name);assert.equal(bad.weather.months[0].complete,false);assert.equal(bad.weather.months[0].Pdaily,null);assert.equal(bad.months[0].gpp,10);
 assert.equal(core.parse(header+'\n'+rows.slice(1).join('\n'),name).weather.months[0].complete,false);
 const copied=core.transferSummary(d,'2024-01-10','2024-01-15');assert.equal(copied.weather.months[0].expected,1488);assert.equal(copied.daily.length,6);assert.equal(core.restoreSummary(JSON.stringify(d)).weather.months[0].complete,true);
@@ -20,6 +21,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js',...(process.env.ACCLIM_PRIVATE_S
  let plan=ctx.towerWeatherPlan(d,'2024-01-01','2024-03-31');assert.equal(plan.segments.length,1);assert.equal(plan.missing.join(','),'2024-02,2024-03');assert.equal(ctx.towerAnnualTemperature(plan,2024).MAT,null);
  let separated={...d,weather:{...d.weather,months:[m,{...m,month:'2024-03'}]}};plan=ctx.towerWeatherPlan(separated,'2024-01-01','2024-03-31');assert.equal(plan.segments.length,2);assert.equal(plan.missing[0],'2024-02');
  plan=ctx.towerWeatherPlan(bad,'2024-01-01','2024-01-31');assert.equal(plan.segments.length,0);assert.ok(plan.rejected[0].includes('pressure: 1487/1488'));
+ assert.throws(()=>ctx.towerWeatherPlan({...d,weather:{...d.weather,version:1}},'2024-01-01','2024-01-31'),/Reprocess/);
  assert.throws(()=>ctx.towerWeatherPlan({version:3},'2024-01-01','2024-02-01'),/Reprocess/);
 
  // Incomplete monthly weather must remain missing in interpolated daily carbon.
