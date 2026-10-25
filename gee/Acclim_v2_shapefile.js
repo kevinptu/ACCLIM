@@ -2899,7 +2899,7 @@ function onRun() {
     var extraTower=runTower && runTower.secondVariable;
     addOptionalSeriesChart(chartCache, ['PredGPPmean', 'GPPmax', 'Amax', 'TowerGPP'].concat(extraTower?['TowerGPP2']:[]),
       ['GPPmean', 'GPPmax', 'Amax', 'Tower '+(runTower && runTower.gppVariable || 'GPP')].concat(extraTower?['Tower '+extraTower]:[]),
-      ['#2E7D32', '#1976D2', '#EF6C00', '#111111'].concat(extraTower?['#8E24AA']:[]), extraTower?[2,3,4]:[2,3], {
+      ['#2E7D32', '#1976D2', '#EF6C00', '#111111'].concat(extraTower?['#8E24AA']:[]), extraTower?[1,2,3,4]:[1,2,3], {
         series: {3: {lineWidth: 0, pointSize: 5},4:{lineWidth:0,pointSize:5}},
         title: regionChartTitle('GPP', regionName), chartArea: {top: 80},
         hAxis: {title: 'Date'}, vAxis: {title: 'umol/m2/s (daytime)'}, lineWidth: 1.5, pointSize: 0
