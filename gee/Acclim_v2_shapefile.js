@@ -124,9 +124,9 @@ var ACCLIM_PARAMS = {
   // C4frac logistic coefficients (from R: 1/(1+exp(-4.04*GPPmax_C4/GPPmax_C3 + 5.99)))
   C4frac_a:       -4.04,
   C4frac_b:       5.99,
-  // fcold logistic coefficients (from R: 1/(1+exp(0.3*(5-Tday_mean))))
-  fcold_slope:    0.3,
-  fcold_T0:       5,
+  // fcold logistic coefficients: 1/(1+exp(0.1*(12-Tday_mean)))
+  fcold_slope:    0.1,
+  fcold_T0:       12,
   // tau temperature scaling: 2600 * 0.57^((T-25)/10)
   tau_base:       2600,
   tau_q10:        0.57,
@@ -763,7 +763,7 @@ function computeDiagnostics(running, instant, params) {
 
   var FAPAR_in = ee.Number(instant.get('EVI2'));
 
-  // fcold: 1 / (1 + exp(0.3 * (5 - Tday_mean)))
+  // fcold: 1 / (1 + exp(0.1 * (12 - Tday_mean)))
   var fcold_mean = ee.Number(1).divide(
     ee.Number(1).add(
       ee.Number(p.fcold_T0).subtract(Tday_mean).multiply(p.fcold_slope).exp()
