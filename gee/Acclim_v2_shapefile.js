@@ -140,7 +140,11 @@ var ACCLIM_PARAMS = {
   em_nv:          0.92,     // emissivity of non-vegetation
   ndvi_min:       0.15,     // NDVI of bare soil
   ndvi_max:       0.95,     // NDVI of maximum green cover
-  ndvi_pow:       1.25      // exponent of fractional green cover ~ NDVI
+  ndvi_pow:       1.25,     // exponent of fractional green cover ~ NDVI
+  // Intercepted PAR fraction used for water and energy partitioning.
+  fipar_ndvi_min: 0.15,
+  fipar_ndvi_max: 0.97,
+  fipar_ndvi_exp: 1.25
 };
 
 var DATASETS = {
@@ -741,6 +745,12 @@ function computeInitialState(forcingList, params) {
   });
 }
 
+// FIPAR is independent of the selected photosynthetic FAPAR method.
+function computeFIPAR(ndvi, p) {
+  return ee.Number(ndvi).subtract(p.fipar_ndvi_min).max(0)
+    .divide(p.fipar_ndvi_max - p.fipar_ndvi_min).pow(p.fipar_ndvi_exp);
+}
+
 /**
  * Compute mean-state-dependent diagnostics from a state dictionary +
  * today's instantaneous values. Pure function of inputs; no side effects.
@@ -832,6 +842,7 @@ function computeDiagnostics(running, instant, params) {
   //   .max(0).min(1);
 
   // FAPAR from squared NDVI, using the current monthly NDVI input.
+  var FIPAR = computeFIPAR(instant.get('NDVI'), p);
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2') {
     var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
@@ -905,11 +916,11 @@ function computeDiagnostics(running, instant, params) {
   var fSM_mean = RHmin_mean.pow(VPDmax_mean);
   var PT_mean = ee.Number(p.PT_coef).multiply(s_ratio_mean).multiply(Rnday_mean);
 
-  var PredLEcday_mean = PT_mean.multiply(FAPAR).multiply(fcold_mean)
+  var PredLEcday_mean = PT_mean.multiply(FIPAR).multiply(fcold_mean)
     .multiply(ee.Number(1).subtract(fwet_mean));
-  var PredLEiday_mean = fwet_mean.multiply(PT_mean).multiply(FAPAR);
+  var PredLEiday_mean = fwet_mean.multiply(PT_mean).multiply(FIPAR);
   var PredLEsday_mean = fwet_mean.add(ee.Number(1).subtract(fwet_mean).multiply(fSM_mean))
-    .multiply(PT_mean).multiply(ee.Number(1).subtract(FAPAR));
+    .multiply(PT_mean).multiply(ee.Number(1).subtract(FIPAR));
   var PredLEday_mean = PredLEcday_mean.add(PredLEsday_mean).add(PredLEiday_mean);
 
   return ee.Dictionary({
@@ -932,6 +943,7 @@ function computeDiagnostics(running, instant, params) {
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR,
+    FIPAR:            FIPAR,
     GPPmax_C3:        GPPmax_C3,
     GPPmax_C4:        GPPmax_C4,
     GPPday_mean_C3:   GPPday_mean_C3,
@@ -1144,7 +1156,7 @@ function soilBucketTrajectory(rows, capacity, keepHistory) {
     var days = r.getNumber('period_days');
     var conversion = r.getNumber('daylength').multiply(3600).multiply(days).divide(2450000);
     var wet = r.getNumber('fwet_mean');
-    var potential = r.getNumber('PT_mean').multiply(ee.Number(1).subtract(r.getNumber('FAPAR')));
+    var potential = r.getNumber('PT_mean').multiply(ee.Number(1).subtract(r.getNumber('FIPAR')));
     var surfaceLE = wet.multiply(potential); // unchanged original surface-water term
     var potentialMM = ee.Number(1).subtract(wet).multiply(potential.max(0)).multiply(conversion);
     var period = soilBucketPeriod(sm, capacity, pr, potentialMM);
@@ -1184,7 +1196,7 @@ function fitSoilBucket(baseline, options) {
   baseline = baseline.sort('millis');
   var checked = baseline.map(function(f) {
     var required = ['precip', 'period_days', 'daylength', 'fwet_mean', 'PT_mean',
-      'FAPAR', 'fSM_mean', 'PredLEsday_mean', 'PredLEday_mean', 'PredLEcday_mean', 'PredLEiday_mean'];
+      'FIPAR', 'fSM_mean', 'PredLEsday_mean', 'PredLEday_mean', 'PredLEcday_mean', 'PredLEiday_mean'];
     var complete = f.toDictionary(required).size().eq(required.length);
     // Defaults only protect validation expressions; missing values are never filled.
     var d = ee.Dictionary.fromLists(required, ee.List.repeat(-9999, required.length))
@@ -1193,7 +1205,7 @@ function fitSoilBucket(baseline, options) {
       .and(ee.Number(d.get('period_days')).gte(28)).and(ee.Number(d.get('period_days')).lte(31))
       .and(ee.Number(d.get('daylength')).gt(0)).and(ee.Number(d.get('daylength')).lte(24))
       .and(ee.Number(d.get('fwet_mean')).gte(0)).and(ee.Number(d.get('fwet_mean')).lte(1))
-      .and(ee.Number(d.get('FAPAR')).gte(0)).and(ee.Number(d.get('FAPAR')).lte(1))
+      .and(ee.Number(d.get('FIPAR')).gte(0)).and(ee.Number(d.get('FIPAR')).lte(1))
       .and(ee.Number(d.get('fSM_mean')).gte(0)).and(ee.Number(d.get('fSM_mean')).lte(1));
     return f.set('_bucket_valid', valid);
   });
@@ -1236,7 +1248,7 @@ function fitSoilBucket(baseline, options) {
   // Full initialization + precipitation >= full-bucket loss in EVERY period
   // implies fSM=1 for every capacity, including zero-demand records.
   var fullRows = validRows.map(function(f) {
-    var loss = f.getNumber('PT_mean').multiply(ee.Number(1).subtract(f.getNumber('FAPAR'))).max(0)
+    var loss = f.getNumber('PT_mean').multiply(ee.Number(1).subtract(f.getNumber('FIPAR'))).max(0)
       .multiply(ee.Number(1).subtract(f.getNumber('fwet_mean')))
       .multiply(f.getNumber('daylength')).multiply(3600).multiply(f.getNumber('period_days')).divide(2450000);
     return f.set('_always_full', f.getNumber('precip').gte(loss));
@@ -1249,7 +1261,7 @@ function fitSoilBucket(baseline, options) {
     ee.Algorithms.If(informative, ee.Algorithms.If(boundary, 'fitted_at_search_boundary', 'fitted'),
       'baseline_unidentifiable_capacity'), 'baseline_requires_complete_contiguous_year')));
   var fallback = baseline.map(function(f) {
-    var potential = f.getNumber('PT_mean').multiply(ee.Number(1).subtract(f.getNumber('FAPAR')));
+    var potential = f.getNumber('PT_mean').multiply(ee.Number(1).subtract(f.getNumber('FIPAR')));
     var surface = f.getNumber('fwet_mean').multiply(potential);
     var soil = ee.Number(1).subtract(f.getNumber('fwet_mean')).multiply(potential.max(0));
     var fullLE = surface.add(soil);
@@ -1269,16 +1281,16 @@ function fitSoilBucket(baseline, options) {
 }
 
 
-// Separate ET-effective diagnostic. Fit the FAPAR-free moisture equation to
+// Separate ET-effective diagnostic. Fit the FIPAR-free moisture equation to
 // ORIGINAL full-canopy total LE, not the shallow-bucket-adjusted total LE.
-// Only the isolated fitting proxy sets FAPAR=0. Copy diagnostics back explicitly,
-// preserving actual FAPAR, GPP, transpiration, and all near-surface outputs.
+// Only the isolated fitting proxy sets FIPAR=0. Copy diagnostics back explicitly,
+// preserving actual FIPAR, FAPAR, GPP, transpiration, and all near-surface outputs.
 function fitETBucket(nearSurface, options) {
   nearSurface = nearSurface.sort('millis');
   var proxy = nearSurface.map(function(f) {
     var properties = f.toDictionary(['date', 'millis', 'precip', 'period_days',
       'daylength', 'fwet_mean', 'PT_mean', 'fSM_mean']);
-    return ee.Feature(null, properties.combine(ee.Dictionary({FAPAR: 0,
+    return ee.Feature(null, properties.combine(ee.Dictionary({FIPAR: 0,
       PredLEsday_mean: f.get('PredLEday_RHVPD'),
       PredLEday_mean: f.get('PredLEday_RHVPD'),
       PredLEcday_mean: 0, PredLEiday_mean: 0})));
@@ -1407,12 +1419,12 @@ function addETMoistureCharts(output, info, regionName) {
 // Retired transpiration-only bucket: see archive/transpiration_bucket_2026-09-18/README.md.
 // Potential fluxes and diagnostic Omega use the final bucket-updated LE (W/m2).
 function addPotentialFluxDiagnostics(f, p) {
-  var pt = f.getNumber('PT_mean'), fapar = f.getNumber('FAPAR');
+  var pt = f.getNumber('PT_mean'), fipar = f.getNumber('FIPAR');
   var le = f.getNumber('PredLEday_mean'), t = f.getNumber('PredLEcday_mean');
   var e = f.getNumber('PredLEsday_mean');
   var pet = pt.multiply(2).subtract(le);
-  var tpot = pt.multiply(fapar).multiply(2).subtract(t);
-  var epot = pt.multiply(ee.Number(1).subtract(fapar)).multiply(2).subtract(e);
+  var tpot = pt.multiply(fipar).multiply(2).subtract(t);
+  var epot = pt.multiply(ee.Number(1).subtract(fipar)).multiply(2).subtract(e);
   function ratio(actual, potential) {
     // Nonpositive potential does not define a daytime evaporative coefficient.
     var valid = potential.gt(0);
@@ -1430,8 +1442,8 @@ function addPotentialFluxDiagnostics(f, p) {
   }
   return f.set({PET_mean: pet, Tpot_mean: tpot, Epot_mean: epot,
     ra: aerodynamicResistance(pet, ee.Number(1)),
-    rac: aerodynamicResistance(tpot, fapar),
-    ras: aerodynamicResistance(epot, ee.Number(1).subtract(fapar)),
+    rac: aerodynamicResistance(tpot, fipar),
+    ras: aerodynamicResistance(epot, ee.Number(1).subtract(fipar)),
     aerodynamic_resistance_units: 's/m',
     Omega_surface: ratio(le, pet), Omega_canopy: ratio(t, tpot), Omega_soil: ratio(e, epot),
     potential_LE_units: 'W/m2 (mean daytime)', Omega_units: 'dimensionless'});
@@ -1440,7 +1452,7 @@ function addPotentialFluxDiagnostics(f, p) {
 // Energy-balance temperature diagnostics (degrees C), after final LE updates.
 function addTemperatureDiagnostics(f, p) {
   var air = f.getNumber('Tday_mean'), rn = f.getNumber('Rnday_mean');
-  var fapar = f.getNumber('FAPAR');
+  var fipar = f.getNumber('FIPAR');
   function temperature(resistanceKey, fraction, leKey) {
     var resistance = f.get(resistanceKey);
     var missing = ee.Algorithms.IsEqual(resistance, null);
@@ -1455,8 +1467,8 @@ function addTemperatureDiagnostics(f, p) {
   var maximum = ee.Number(ee.Algorithms.If(missingSurface, 0, surface)).multiply(1.33)
     .subtract(f.getNumber('Tmin_mean').multiply(0.33));
   return f.set({Tsurface_mean: surface,
-    Tcanopy_mean: temperature('rac', fapar, 'PredLEcday_mean'),
-    Tsoil_mean: temperature('ras', ee.Number(1).subtract(fapar), 'PredLEsday_mean'),
+    Tcanopy_mean: temperature('rac', fipar, 'PredLEcday_mean'),
+    Tsoil_mean: temperature('ras', ee.Number(1).subtract(fipar), 'PredLEsday_mean'),
     Tsurface_max: ee.Algorithms.If(missingSurface, null, maximum),
     surface_temperature_units: 'degrees C'});
 }
