@@ -102,7 +102,8 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
-  faparMethod: 'NDVI',     // NDVI squared or EVI2 calibrated to NDVI squared
+  faparMethod: 'EVI2',     // NDVI squared or scaled EVI2
+  fitEVI2: false,         // Fit EVI2 bounds against NDVI squared; otherwise use fixed bounds
   k: 0.5,                  // canopy light extinction coefficient for LAI retrieval (must be > 0)
   CUEplant:       0.5,      // total plant NPP / GPP
   carbonToBiomass: 2.1276, // exact RAP conversion supplied by user (~47% C)
@@ -139,9 +140,9 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  fipar_ndvi_min: 0.15,
-  fipar_ndvi_max: 0.97,
-  fipar_ndvi_exp: 1.25
+  ndvi_min: 0.15,
+  ndvi_max: 0.97,
+  ndvi_exp: 1.25
 };
 
 var DATASETS = {
@@ -742,8 +743,8 @@ function computeInitialState(forcingList, params) {
 
 // FIPAR is independent of the selected photosynthetic FAPAR method.
 function computeFIPAR(ndvi, p) {
-  return ee.Number(ndvi).subtract(p.fipar_ndvi_min).max(0)
-    .divide(p.fipar_ndvi_max - p.fipar_ndvi_min).pow(p.fipar_ndvi_exp);
+  return ee.Number(ndvi).subtract(p.ndvi_min).max(0)
+    .divide(p.ndvi_max - p.ndvi_min).pow(p.ndvi_exp);
 }
 
 /**
@@ -839,7 +840,9 @@ function computeDiagnostics(running, instant, params) {
   // FAPAR from squared NDVI, using the current monthly NDVI input.
   var FIPAR = ee.Number(instant.get('FIPAR'));
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
-  if (p.faparMethod === 'EVI2') {
+  if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
+    FAPAR = FAPAR_in.subtract(p.EVI2min).divide(p.EVI2max - p.EVI2min).max(0).min(1);
+  } else if (p.faparMethod === 'EVI2') {
     var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
       .divide(p.faparFit.max.subtract(p.faparFit.min)).max(0).min(1);
     FAPAR = ee.Number(ee.Algorithms.If(p.faparFit.valid, scaledEVI2, FAPAR));
@@ -1486,7 +1489,11 @@ function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
   if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2') throw new Error('Unknown FAPAR method.');
-  if (p.faparMethod === 'EVI2' && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC);
+  if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC);
+  if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
+      (!isFinite(p.EVI2min) || !isFinite(p.EVI2max) || p.EVI2max <= p.EVI2min)) {
+    throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
+  }
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   var forcingList = forcingFC.sort('millis').toList(forcingFC.size());
   var initial = computeInitialState(forcingList, p);
@@ -1500,7 +1507,10 @@ function runACCLIM(forcingFC, params) {
   // these are not monthly totals. Nighttime flux is assumed zero.
   return fitETBucket(nearSurface, p.etBucket).map(function(f) {
     f = f.set('FAPAR_method_requested', p.faparMethod);
-    if (p.faparMethod === 'EVI2') {
+    if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
+      f = f.set({FAPAR_method: 'EVI2', FAPAR_fit_status: 'fixed bounds',
+        FAPAR_EVI2min: p.EVI2min, FAPAR_EVI2max: p.EVI2max});
+    } else if (p.faparMethod === 'EVI2') {
       f = f.set({FAPAR_method: ee.Algorithms.If(p.faparFit.valid, 'EVI2', 'NDVI'),
         FAPAR_fit_status: ee.Algorithms.If(p.faparFit.valid, 'fitted', 'NDVI fallback: insufficient pairs or nonpositive/degenerate slope'),
         FAPAR_fit_n: p.faparFit.count,
@@ -1669,7 +1679,7 @@ function runForGeometry(geom, startDate, endDate, paramOverrides, config) {
       groups.push(forcing);
     });
     var overrides=mergeParams(paramOverrides||{},{});
-    if(overrides.faparMethod==='EVI2')overrides.faparFit=fitEVI2FAPAR(allVI);
+    if(overrides.faparMethod==='EVI2' && overrides.fitEVI2)overrides.faparFit=fitEVI2FAPAR(allVI);
     var result=ee.FeatureCollection([]);
     groups.forEach(function(forcing){result=result.merge(ee.FeatureCollection(ee.Algorithms.If(forcing.size().gt(0),runACCLIM(forcing,overrides),ee.FeatureCollection([]))));});
     var missing=ee.FeatureCollection(config.weatherPlan.missing.map(function(month){return ee.Feature(geom,{date:month+'-01',millis:ee.Date(month+'-01').millis(),weather_source:'tower',weather_status:'missing_weather'});}));
@@ -2229,7 +2239,8 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       if (bucketInfo.FAPAR_method_requested === 'EVI2') {
         addChartNote(ui.Label(bucketInfo.FAPAR_method === 'EVI2'
           ? 'FAPAR = EVI2 scaled between EVI2min=' + bucketInfo.FAPAR_EVI2min.toFixed(3) +
-            ' and EVI2max=' + bucketInfo.FAPAR_EVI2max.toFixed(3)
+            ' and EVI2max=' + bucketInfo.FAPAR_EVI2max.toFixed(3) +
+            ' (' + bucketInfo.FAPAR_fit_status + ')'
           : 'FAPAR: NDVI² fallback. EVI2 fit needs at least 3 paired months and a positive slope.'));
       }
       addWeatherCharts(output, result.monthly, regionName);
@@ -2359,6 +2370,8 @@ UI.faparSelector = ui.Select({items: [
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+UI.fitEVI2Checkbox = ui.Checkbox({label: 'Fit EVI2 bounds against NDVI² (EVI2 method only)', value: false});
+UI.inputPanel.add(UI.fitEVI2Checkbox);
 setupTowerImport();
 UI.inputPanel.add(UI.runButton);
 
@@ -2855,7 +2868,7 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {faparMethod: UI.faparSelector.getValue()}, {weatherPlan:UI._runWeatherPlan});
+    var output = runForGeometry(geom, startDate, endDate, {faparMethod: UI.faparSelector.getValue(), fitEVI2: UI.fitEVI2Checkbox.getValue()}, {weatherPlan:UI._runWeatherPlan});
     UI._lastOutput = output;
     UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
 
