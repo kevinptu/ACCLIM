@@ -138,9 +138,6 @@ var ACCLIM_PARAMS = {
   sb:             5.67e-8,  // Stefan-Boltzmann (W/m2/K4)
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
-  ndvi_min:       0.15,     // NDVI of bare soil
-  ndvi_max:       0.95,     // NDVI of maximum green cover
-  ndvi_pow:       1.25,     // exponent of fractional green cover ~ NDVI
   // Intercepted PAR fraction used for water and energy partitioning.
   fipar_ndvi_min: 0.15,
   fipar_ndvi_max: 0.97,
@@ -588,16 +585,14 @@ function assembleForcing(geom, startDate, endDate, config) {
 
     // PT-JPL net-radiation derivation (Rndaily, W/m2, 24-hour mean)
     //   albedo     = (red + nir) / 2
-    //   greencover = ((NDVI - ndvi_min) / (ndvi_max - ndvi_min))^ndvi_pow, clamped
-    //   em_sur     = greencover * em_v + (1 - greencover) * em_nv
+    //   FIPAR uses the shared NDVI interception function below.
+    //   em_sur     = FIPAR * em_v + (1 - FIPAR) * em_nv
     //   em_air     = 1.31 * (10 * ea / (Tdaily + 273.15))^(1/7)
     //   Rndaily    = (1 - albedo) * SWRdaily + sb * (Tdaily + 273.15)^4 * (em_air - em_sur)
     var albedo = red.add(nir).divide(2).max(0).min(1);
-    var greencover = NDVI.subtract(p.ndvi_min).max(0)
-      .divide(p.ndvi_max - p.ndvi_min)
-      .pow(p.ndvi_pow).min(1);
-    var em_sur = greencover.multiply(p.em_v)
-      .add(ee.Number(1).subtract(greencover).multiply(p.em_nv));
+    var FIPAR = computeFIPAR(NDVI, p);
+    var em_sur = FIPAR.multiply(p.em_v)
+      .add(ee.Number(1).subtract(FIPAR).multiply(p.em_nv));
     var em_air = ee.Number(10).multiply(ea).divide(Tdaily.add(273.15))
       .pow(1 / 7).multiply(1.31);
     var T_K4 = Tdaily.add(273.15).pow(4);
@@ -618,7 +613,7 @@ function assembleForcing(geom, startDate, endDate, config) {
       red:       red,
       nir:       nir,
       albedo:    albedo,
-      greencover: greencover,
+      FIPAR: FIPAR,
       Rndaily:   Rndaily,
       // MVP constants
       Pdaily:    towerRows ? f.getNumber('Pdaily') : MVP_CONSTANTS.Pdaily,
@@ -842,7 +837,7 @@ function computeDiagnostics(running, instant, params) {
   //   .max(0).min(1);
 
   // FAPAR from squared NDVI, using the current monthly NDVI input.
-  var FIPAR = computeFIPAR(instant.get('NDVI'), p);
+  var FIPAR = ee.Number(instant.get('FIPAR'));
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2') {
     var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
@@ -1055,7 +1050,7 @@ function acclimStep(currentFeat, prevState, params) {
     PARday_mean: PARday_mean, Rnday_mean: Rnday_mean,
     RHmin_mean: RHmin_mean
   });
-  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI});
+  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR')});
 
   var diag = computeDiagnostics(runningNow, instant, p);
 

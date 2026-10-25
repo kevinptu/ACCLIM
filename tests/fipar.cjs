@@ -12,6 +12,12 @@ for (const path of paths) {
  vm.createContext(ctx);
  vm.runInContext(s.slice(s.indexOf('function computeFIPAR('),s.indexOf('/**\n * Compute mean-state-dependent diagnostics')).replace(/\r/g,''),ctx);
  for(const ndvi of [-.2,.15,.5,.97,1]) assert(Math.abs(ctx.computeFIPAR(ndvi,ctx.p).v-(Math.max(0,ndvi-.15)/.82)**1.25)<1e-12);
+ assert(!s.includes('greencover'));
+ assert(!/\bndvi_(min|max|pow)\b/.test(s));
+ assert.strictEqual((s.match(/computeFIPAR\(/g)||[]).length,2); // Definition and single forcing calculation.
+ assert(s.includes("FIPAR: f.getNumber('FIPAR')"));
+ assert(s.includes("var FIPAR = ee.Number(instant.get('FIPAR'));"));
+ assert(s.includes('var em_sur = FIPAR.multiply(p.em_v)'));
  const block=s.slice(s.indexOf('  var PredLEcday_mean ='),s.indexOf('  return ee.Dictionary',s.indexOf('  var PredLEcday_mean =')));
  function water(fapar,fipar){Object.assign(ctx,{FAPAR:new N(fapar),FIPAR:new N(fipar),PT_mean:new N(100),fcold_mean:new N(.8),fwet_mean:new N(.1),fSM_mean:new N(.5)});vm.runInContext(block,ctx);return ['PredLEcday_mean','PredLEiday_mean','PredLEsday_mean','PredLEday_mean'].map(k=>ctx[k].v);}
  assert.deepStrictEqual(water(.2,.6),water(.9,.6));
