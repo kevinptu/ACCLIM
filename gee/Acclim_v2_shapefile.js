@@ -2481,6 +2481,7 @@ function parseTowerMonthly(text) {
       ['daylight','total','unknownLight','absent','secondN'].forEach(function(k){if(!carbonFinite(row[k])||row[k]<0||row[k]%1!==0)throw new Error('Invalid coverage count.');});
       if(!carbonFinite(row.secondSum)||row.n>row.daylight||row.secondN>row.daylight||row.daylight+row.unknownLight>row.total||(!row.n&&row.sum!==0)||(!row.secondN&&row.secondSum!==0))throw new Error('Inconsistent tower coverage.');
     }
+    if(data.leVariable==='LE_CORR'&&(!carbonFinite(row.leSum)||!carbonFinite(row.leN)||row.leN<0||row.leN%1!==0||row.leN>row.total||(!row.leN&&row.leSum!==0)))throw new Error('Invalid LE_CORR summary.');
     seen[row.date] = true;
   });
   data.daily.sort(function(a,b) { return a.date < b.date ? -1 : 1; });
@@ -2496,12 +2497,14 @@ function towerMonthsInRange(tower, start, end) {
   var months = {};
   tower.daily.forEach(function(day) {
     if (day.date < start || day.date > end) return;
-    var key = day.date.slice(0,7), m = months[key] || (months[key] = {sum:0,n:0,days:0,secondSum:0,secondN:0,daylight:0,total:0,unknownLight:0,absent:0});
-    ['sum','n','secondSum','secondN','daylight','total','unknownLight','absent'].forEach(function(k){m[k] += day[k] || 0;});
+    var key = day.date.slice(0,7), m = months[key] || (months[key] = {leSum:0,leN:0,sum:0,n:0,days:0,secondSum:0,secondN:0,daylight:0,total:0,unknownLight:0,absent:0});
+    ['sum','n','secondSum','secondN','daylight','total','unknownLight','absent','leSum','leN'].forEach(function(k){m[k] += day[k] || 0;});
     if(tower.version === 2 || day.total > 0) m.days++;
   });
   Object.keys(months).forEach(function(key) {
     var m=months[key]; m.gpp=m.n ? m.sum/m.n : null; m.secondGpp=m.secondN ? m.secondSum/m.secondN : null;
+    m.leET=tower.leVariable==='LE_CORR'&&m.leN ? m.leSum/m.leN*86400/2450000 : null;
+    m.leMissingPct=tower.leVariable==='LE_CORR'&&m.total ? 100*(m.total-m.leN)/m.total : null;
     m.missingPct=tower.version===3 && m.daylight ? 100*(m.daylight-m.n)/m.daylight : null;
     m.secondMissingPct=tower.version===3 && m.daylight ? 100*(m.daylight-m.secondN)/m.daylight : null;
   });
@@ -2602,7 +2605,7 @@ function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
     var m=months[key]; if(!m)return;
     function pct(x){return x===null?'unavailable':x.toFixed(1)+'%';}
     coverage.setValue(key+': missing GPP '+pct(m.missingPct)+(tower.secondVariable?'; missing '+tower.secondVariable+' '+pct(m.secondMissingPct):'')+
-      '. Valid primary/daytime records: '+m.n+'/'+m.daylight+'. Unknown radiation: '+(m.total?(100*m.unknownLight/m.total).toFixed(1)+'%':'unavailable')+
+      '; LE_CORR missing '+pct(m.leMissingPct)+'. Valid primary/daytime records: '+m.n+'/'+m.daylight+'. Unknown radiation: '+(m.total?(100*m.unknownLight/m.total).toFixed(1)+'%':'unavailable')+
       '; absent intervals: '+m.absent+'. No coverage cutoff. Missing percentages exclude records whose daytime status is unknown.');
   }});
   UI._chartCard.add(monthChoice).add(coverage);
@@ -2610,6 +2613,7 @@ function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
     var count=0,partial=[],keys=[];
     cache.rows.forEach(function(row){
       var key=row.date.slice(0,7),m=months[key];
+      row.TowerLE_CORR_mm_day=m?m.leET:null;row.TowerLE_CORR_count=m?m.leN:null;row.TowerLE_CORR_missing_pct=m?m.leMissingPct:null;
       row.TowerGPP=m?m.gpp:null;row.TowerGPP2=m?m.secondGpp:null;row.TowerGPP_count=m?m.n:null;
       row.TowerGPP_missing_pct=m?m.missingPct:null;row.TowerGPP2_missing_pct=m?m.secondMissingPct:null;
       if(m){keys.push(key);if(m.n||m.secondN)count++;var p=key.split('-'),days=new Date(Number(p[0]),Number(p[1]),0).getDate();if(m.days<days)partial.push(key);}
@@ -2621,6 +2625,7 @@ function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
       '. '+(mismatch?'Verify selected location against tower coordinates. ':'')+'Whole-footprint observations; dates '+start+' through '+end+'. '+
       (partial.length?'Partial-month coverage: '+partial.join(', ')+'. Model points remain full-month estimates. ':'')+
       (provenance.citation?'Citation: '+provenance.citation+' ':'')+(provenance.productId?'Product: '+provenance.productId:''));
+    UI._lastOutput=carbonRowsToFC(cache.rows);
     cache.refresh.forEach(function(refresh){refresh();});
   }
   if(cache.rows)update();else cache.ready.push(update);
@@ -2853,17 +2858,6 @@ function onRun() {
 
     setStatus('Building chart (server-side)...');
 
-    var etChart = ui.Chart.feature.byFeature(output, 'date',
-        ['ET_mm_day', 'T_mm_day', 'E_mm_day', 'I_mm_day'])
-      .setSeriesNames(['ET', 'T', 'E', 'I'])
-      .setOptions({
-        title: regionChartTitle('Evapotranspiration', regionName), chartArea: {top: 80},
-        hAxis: {title: 'Date'},
-        vAxis: {title: 'mm/day', viewWindow: {min: 0}},
-        colors: ['#000000', '#2E7D32', '#1976D2', '#808080'],
-        lineWidth: 1.2, pointSize: 0
-      });
-
     var conductanceChart;
     var chartCache = {rows: null, ready: [], refresh: []};
     var c4Chart = function(rows) {
@@ -2901,7 +2895,16 @@ function onRun() {
     addTowerControls(chartCache, runTower, startDate, endDate, towerLat, towerLon, towerCoordinateMode);
     UI._annualGPPNote = ui.Label({value: 'Annual GPP: calculating...', style: {whiteSpace: 'pre-wrap'}});
     addChartNote(UI._annualGPPNote);
-    addResultChart(etChart);
+    addOptionalSeriesChart(chartCache,['ET_mm_day','T_mm_day','E_mm_day','I_mm_day','TowerLE_CORR_mm_day'],
+      ['ET','T','E','I','Tower LE_CORR'],['#000000','#2E7D32','#1976D2','#808080','#D81B60'],[4],{
+        title:regionChartTitle('Evapotranspiration',regionName),chartArea:{top:80},
+        hAxis:{title:'Date'},vAxis:{title:'mm/day'},lineWidth:1.2,pointSize:0,
+        series:{4:{lineWidth:0,pointSize:5}}
+      });
+    addChartNote(ui.Label(runTower&&runTower.leVariable==='LE_CORR'?
+      'Tower LE_CORR: available full-day flux mean × 86400 / 2450000 (mm/day). Includes night and negative fluxes; missing percentages are in Monthly tower coverage.':
+      'To add tower LE_CORR, reprocess a CSV/ZIP containing LE_CORR and import the new summary.'));
+
     function addRemainingDiagnosticCharts() {
     conductanceChart = ui.Chart.feature.byFeature(output, 'date', ['gs', 'rs'])
       .setSeriesNames(['gs', 'rs'])

@@ -18,6 +18,12 @@ for(let t=first;t<last;t+=1800000)q.add(new Date(t).toISOString().slice(0,10),['
 for(const file of ['gee/Acclim_v2_shapefile.js',...(process.env.ACCLIM_PRIVATE_SCRIPT?[process.env.ACCLIM_PRIVATE_SCRIPT]:[])]){
  const s=fs.readFileSync(file.startsWith('gee/')?__dirname+'/../'+file:file,'utf8');new vm.Script(s);const ctx={};vm.createContext(ctx);
  vm.runInContext('function carbonFinite(x){return typeof x==="number"&&isFinite(x);}\n'+s.slice(s.indexOf('function towerWeatherPlan('),s.indexOf('function setupTowerImport(')),ctx);
+ vm.runInContext(s.slice(s.indexOf('function parseTowerMonthly('),s.indexOf('// Validate imported monthly weather')),ctx);
+ const leMonth=ctx.towerMonthsInRange(ctx.parseTowerMonthly(JSON.stringify(d)),'2024-01-01','2024-01-31')['2024-01'];
+ assert.ok(Math.abs(leMonth.leET-35*86400/2450000)<1e-12);assert.equal(leMonth.leMissingPct,0);
+ const lePartial=ctx.towerMonthsInRange(ctx.parseTowerMonthly(JSON.stringify(fluxBad)),'2024-01-01','2024-01-31')['2024-01'];
+ assert.equal(lePartial.leN,1487);assert.ok(lePartial.leET!==null);assert.ok(Math.abs(lePartial.leMissingPct-100/1488)<1e-12);
+ const leCopy=ctx.parseTowerMonthly(JSON.stringify(core.transferSummary(d,'2024-01-01','2024-01-31')));assert.equal(leCopy.leVariable,'LE_CORR');assert.equal(leCopy.daily[0].leN,48);
  let plan=ctx.towerWeatherPlan(d,'2024-01-01','2024-03-31');assert.equal(plan.segments.length,1);assert.equal(plan.missing.join(','),'2024-02,2024-03');assert.equal(ctx.towerAnnualTemperature(plan,2024).MAT,null);
  let separated={...d,weather:{...d.weather,months:[m,{...m,month:'2024-03'}]}};plan=ctx.towerWeatherPlan(separated,'2024-01-01','2024-03-31');assert.equal(plan.segments.length,2);assert.equal(plan.missing[0],'2024-02');
  plan=ctx.towerWeatherPlan(bad,'2024-01-01','2024-01-31');assert.equal(plan.segments.length,0);assert.ok(plan.rejected[0].includes('pressure: 1487/1488'));

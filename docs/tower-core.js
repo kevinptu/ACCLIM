@@ -94,11 +94,12 @@ function parse(text,name,options={}) {
   const info=inspect(text,name),h=info.header;
   const variable=options.variable||info.variables[0],rad=options.radiation||info.radiation[0],other=options.secondVariable||'';
   if(!info.variables.includes(variable)||!info.radiation.includes(rad)||(other&&!info.variables.includes(other))||other===variable)throw Error('Selected fields are not available or duplicated.');
+  const lei=h.indexOf('LE_CORR');
   const gi=h.indexOf(variable),ri=h.indexOf(rad),oi=h.indexOf(other),mi=h.indexOf('MIDPOINT_DATETIME'),si=h.indexOf('TIMESTAMP_START'),ei=h.indexOf('TIMESTAMP_END');
   const rqi=h.indexOf(rad+'_QC'),nqi=h.indexOf('NEE_VUT_REF_QC');
   const weather=weatherTools.create(h,options.weather,rad,num,info.quanterra);
   const days={},seen=new Set();let started=false,units=false,previous=null,interval=null,validStart=null,validEnd=null;
-  function bucket(t){const date=new Date(t).toISOString().slice(0,10);return days[date]||(days[date]={date,sum:0,n:0,secondSum:0,secondN:0,daylight:0,total:0,unknownLight:0,absent:0,radiationQC:{},neeQC:{}});}
+  function bucket(t){const date=new Date(t).toISOString().slice(0,10);return days[date]||(days[date]={date,leSum:0,leN:0,sum:0,n:0,secondSum:0,secondN:0,daylight:0,total:0,unknownLight:0,absent:0,radiationQC:{},neeQC:{}});}
   for(const row of csv(text)) {
     if(!started){if(row.map(v=>v.trim()).join('|')===h.join('|'))started=true;continue;}
     if(info.quanterra&&!units){if(row[gi]!=='micromol/m2/s')throw Error('Expected micromol/m2/s GPP units.');weather.checkUnits(row);units=true;continue;}
@@ -113,7 +114,7 @@ function parse(text,name,options={}) {
     if(previous!==null&&!interval){const gap=t-previous;if(gap===1800000||gap===3600000)interval=gap;}
     if(previous!==null&&interval){const gap=t-previous;if(gap%interval!==0)throw Error('Timestamp cadence does not match interval length.');if(gap>interval){if(gap/interval>2000000)throw Error('Unreasonable timestamp gap.');for(let missing=previous+interval;missing<t;missing+=interval)bucket(missing).absent++;}}
     previous=t;
-    const d=bucket(t),g=num(row[gi]),sw=num(row[ri]),g2=other?num(row[oi]):NaN;d.total++;weather.add(d.date,row);
+    const d=bucket(t),g=num(row[gi]),sw=num(row[ri]),g2=other?num(row[oi]):NaN;d.total++;weather.add(d.date,row);const le=num(row[lei]);if(Number.isFinite(le)){d.leSum+=le;d.leN++;}
     if(!Number.isFinite(sw)){d.unknownLight++;continue;}
     if(sw<=0)continue;
     d.daylight++;
@@ -126,6 +127,7 @@ function parse(text,name,options={}) {
   if(!validStart)throw Error('No valid daytime GPP in the selected field(s).');
   const meta=options.metadata||{};
   const result={version:3,site:meta.site||info.site,latitude:meta.latitude??info.latitude,longitude:meta.longitude??info.longitude,start:validStart,end:validEnd,units:'micromol/m2/s',filter:'INCOMING_SHORTWAVE_RADIATION > 0',gppVariable:variable,secondVariable:other,radiationVariable:rad,intervalMinutes:interval/60000,provenance:{filename:name,citation:meta.citation||'',productId:meta.productId||'',qualityNote:'All finite GPP retained, including gap-filled and negative values. NEE QC is not a direct GPP quality flag.'},daily:Object.values(days).sort((a,b)=>a.date.localeCompare(b.date))};
+  result.leVariable=lei>=0?'LE_CORR':'';
   result.weather=weather.finish(interval);
   result.months=monthly(result,result.daily[0].date,result.daily.at(-1).date);return result;
 }
@@ -152,6 +154,7 @@ function restoreSummary(text) {
   for(const r of d.daily){
     if(!/^\d{4}-\d{2}-\d{2}$/.test(r.date)||!Number.isFinite(Date.parse(r.date))||new Date(r.date).toISOString().slice(0,10)!==r.date||seen.has(r.date))throw Error('Invalid or duplicate summary date.');
     seen.add(r.date);
+    if(d.leVariable==='LE_CORR'&&(!Number.isFinite(r.leSum)||!Number.isInteger(r.leN)||r.leN<0||r.leN>r.total||(!r.leN&&r.leSum!==0)))throw Error('Invalid LE_CORR summary.');
     for(const k of ['n','secondN','daylight','total','unknownLight','absent'])if(!Number.isInteger(r[k])||r[k]<0)throw Error('Invalid summary coverage.');
     if(!Number.isFinite(r.sum)||!Number.isFinite(r.secondSum)||r.n>r.daylight||r.secondN>r.daylight||r.daylight+r.unknownLight>r.total||(!r.n&&r.sum!==0)||(!r.secondN&&r.secondSum!==0))throw Error('Inconsistent summary coverage.');
   }
@@ -163,9 +166,9 @@ function restoreSummary(text) {
 }
 function transferSummary(data,start,end){
   if(!start||!end||start>end)throw Error('Choose a valid comparison date range.');
-  const daily=data.daily.filter(r=>r.date>=start&&r.date<=end).map(r=>Object.fromEntries(['date','sum','n','secondSum','secondN','daylight','total','unknownLight','absent'].map(k=>[k,r[k]])));
+  const daily=data.daily.filter(r=>r.date>=start&&r.date<=end).map(r=>Object.fromEntries(['date','sum','n','secondSum','secondN','daylight','total','unknownLight','absent','leSum','leN'].map(k=>[k,r[k]])));
   if(!daily.some(r=>r.n||r.secondN))throw Error('No valid daytime GPP in the selected date range.');
-  const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance'])out[k]=data[k];
+  const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance','leVariable'])out[k]=data[k];
   if(data.weather)out.weather={...data.weather,months:data.weather.months.filter(m=>m.month>=start.slice(0,7)&&m.month<=end.slice(0,7))};
   out.daily=daily;out.start=start;out.end=end;return out;
 }
