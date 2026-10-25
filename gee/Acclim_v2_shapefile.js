@@ -929,6 +929,8 @@ function computeDiagnostics(running, instant, params) {
     zC3:              zC3,
     bC3:              bC3,
     cC3:              cC3,
+    ciC3_ppm:        ciC3_ppm,
+    gamma_ppm:       gamma_ppm,
     cicaC3_mean:      cicaC3_mean,
     cicaC4_mean:      cicaC4_mean,
     cica_mean:        cica_mean,
@@ -2175,6 +2177,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       });
       output = carbonRowsToFC(result.monthly);
       UI._lastOutput = output; // monthly CSV includes AWC and ET, E, and T source depths
+      UI._monthlyExportReady = true;
       var bucketInfo = {};
       var bucketRow=result.monthly.filter(function(r){return carbonFinite(r.PredGPPmean);})[0];
       if (bucketRow) Object.keys(bucketRow).forEach(function(key) {
@@ -2694,7 +2697,7 @@ UI.exportPanel = ui.Panel({
   style: { margin: '8px 0px 0px 0px' }
 });
 UI.exportCsv = ui.Button({
-  label: 'Export CSV to Drive',
+  label: 'Prepare monthly CSV download',
   onClick: function() { onExportCsv(); },
   style: { stretch: 'horizontal', padding: '6px',
            margin: '0px 4px 0px 0px' }
@@ -2706,6 +2709,8 @@ UI.export16day = ui.Button({label: 'Export 16-day CSV',
   onClick: function() { onExportCarbon('16day'); }, style: {stretch: 'horizontal'}});
 UI.exportPanel.add(UI.exportDaily);
 UI.exportPanel.add(UI.export16day);
+UI.csvDownloadLink = ui.Label({value: '', style: {shown: false, color: '#1565C0'}});
+UI.exportPanel.add(UI.csvDownloadLink);
 UI.resultsPanel.add(UI.exportPanel);
 
 // Title is attached to the floating control header below.
@@ -2731,6 +2736,9 @@ function setStatus(msg) {
 
 function clearResults() {
   UI._requestId++;
+  UI._monthlyExportReady = false;
+  UI._downloadRequestId = (UI._downloadRequestId || 0) + 1;
+  UI.csvDownloadLink.style().set({shown: false});
   UI._lastOutput = null;
   UI._lastDaily = null;
   UI._last16day = null;
@@ -2995,35 +3003,48 @@ function onReset() {
 // SECTION 8 — EXPORTS
 // ============================================================================
 
+// Direct table downloads work in published Earth Engine Apps without Tasks.
+function prepareCsvDownload(collection, cadence) {
+  var run = UI._lastRun;
+  var requestId = UI._requestId;
+  var downloadId = (UI._downloadRequestId || 0) + 1;
+  UI._downloadRequestId = downloadId;
+  UI.csvDownloadLink.style().set({shown: false});
+  var name = ('acclim_' + run.site + '_' + cadence + '_' + run.start + '_to_' + run.end)
+    .replace(/[^A-Za-z0-9_-]/g, '_');
+  var tabular = collection.map(function(f) {
+    return f.setGeometry(null).set({export_site: run.site,
+      export_start: run.start, export_end: run.end, export_weather_source: run.weatherSource});
+  });
+  setStatus('Preparing ' + cadence + ' CSV download...');
+  function finish(url, error) {
+    if (requestId !== UI._requestId || downloadId !== UI._downloadRequestId) return;
+    if (error || !url) {
+      setStatus('CSV download could not be prepared: ' + (error && error.message || error || 'No download URL returned.'));
+      return;
+    }
+    UI.csvDownloadLink.setValue('Download ' + cadence + ' CSV');
+    UI.csvDownloadLink.setUrl(url);
+    UI.csvDownloadLink.style().set({shown: true});
+    setStatus('CSV ready. Click Download ' + cadence + ' CSV in the results export panel.');
+  }
+  try {
+    tabular.getDownloadURL({format: 'csv', filename: name, callback: finish});
+  } catch (error) { finish(null, error); }
+}
+
 function onExportCarbon(cadence) {
   var collection = cadence === 'daily' ? UI._lastDaily : UI._last16day;
   if (!collection || !UI._lastRun) { setStatus('Run the model and wait for carbon products before exporting.'); return; }
-  var name = ('acclim_' + UI._lastRun.site + '_' + cadence + '_' + UI._lastRun.start + '_to_' + UI._lastRun.end)
-    .replace(/[^A-Za-z0-9_-]/g, '_');
-  Export.table.toDrive({collection: collection, description: name, fileNamePrefix: name, fileFormat: 'CSV'});
-  setStatus('Export task queued: "' + name + '". Open the Tasks tab to start it.');
+  prepareCsvDownload(collection, cadence);
 }
 
 function onExportCsv() {
-  if (!UI._lastOutput) {
-    setStatus('Run the model before exporting.');
+  if (!UI._lastOutput || !UI._lastRun || !UI._monthlyExportReady) {
+    setStatus('Run the model and wait for monthly results before exporting.');
     return;
   }
-  var site = UI._lastRun.site;
-  var start = UI._lastRun.start;
-  var end = UI._lastRun.end;
-  var name = 'acclim_' + site + '_' + start + '_to_' + end;
-
-  // Drop the geometry to keep CSV tabular.
-  var tabular = UI._lastOutput.map(function(f) { return f.setGeometry(null); });
-
-  Export.table.toDrive({
-    collection: tabular,
-    description: name,
-    fileNamePrefix: name,
-    fileFormat: 'CSV'
-  });
-  setStatus('Export task queued: "' + name + '". Open the Tasks tab to start it.');
+  prepareCsvDownload(UI._lastOutput, 'monthly');
 }
 
 
