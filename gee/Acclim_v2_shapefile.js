@@ -2365,13 +2365,11 @@ UI.runButton = ui.Button({
 });
 
 UI.faparSelector = ui.Select({items: [
-  {label: 'FAPAR = NDVI²', value: 'NDVI'},
-  {label: 'FAPAR = scaled EVI2', value: 'EVI2'}], value: 'EVI2',
+  {label: 'FAPAR = EVI2 scaled to NDVI²', value: 'EVI2_FITTED'},
+  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'EVI2_FIXED',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
-UI.fitEVI2Checkbox = ui.Checkbox({label: 'Fit EVI2 bounds against NDVI² (EVI2 method only)', value: false});
-UI.inputPanel.add(UI.fitEVI2Checkbox);
 setupTowerImport();
 UI.inputPanel.add(UI.runButton);
 
@@ -2868,7 +2866,7 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {faparMethod: UI.faparSelector.getValue(), fitEVI2: UI.fitEVI2Checkbox.getValue()}, {weatherPlan:UI._runWeatherPlan});
+    var output = runForGeometry(geom, startDate, endDate, {faparMethod: 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED'}, {weatherPlan:UI._runWeatherPlan});
     UI._lastOutput = output;
     UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
 
