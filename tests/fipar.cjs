@@ -19,7 +19,7 @@ for (const path of paths) {
  assert(s.includes("FIPAR: f.getNumber('FIPAR')"));
  assert(s.includes("var FIPAR = ee.Number(instant.get('FIPAR'));"));
  assert(s.includes('var em_sur = FIPAR.multiply(p.em_v)'));
- const faparBlock=s.slice(s.indexOf("  var FAPAR = ee.Number(instant.get('NDVI')).pow(2);"),s.indexOf('  // GPPmax (umolCO2'));
+ const faparBlock=s.slice(s.indexOf("  var FAPAR = ee.Number(instant.get('NDVI')).pow(2);"),s.indexOf('  // zC3 (R formula'));
  ctx.ee.Algorithms={If:(c,a,b)=>c?a:b};
  function fapar(method,fit,evi,valid=true){
    Object.assign(ctx.p,{faparMethod:method,fitEVI2:fit,EVI2min:.1,EVI2max:.8});

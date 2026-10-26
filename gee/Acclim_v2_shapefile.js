@@ -115,7 +115,7 @@ var ACCLIM_PARAMS = {
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
   EVI2min:        0.1,     // EVI2 of bare ground
-  EVI2max:        0.8,     // EVI2 of full green canopy
+  EVI2max:        0.6,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
   rho_air:        1.292,    // air density (kg/m3)
@@ -788,39 +788,6 @@ function computeDiagnostics(running, instant, params) {
   var s_mean = esTday_mean.multiply(p.magnus_a).multiply(p.magnus_b)
     .divide(Tday_mean.add(p.magnus_b).pow(2));
 
-  // zC3 (R formula, units arranged for the quadratic):
-  //   zC3 = ((1.5*GPPmean2GPPmax*2500*18)/(QRC3*1.26*(1+fresp))) *
-  //         ((s + gamma_psy) * VPDday_mean * PARday_mean * 1000) /
-  //         (s * Rnday_mean * Pmean)
-  var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
-    .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
-  var zC3 = zCoef.multiply(
-    s_mean.add(p.gamma_psy).multiply(VPDday_mean).multiply(PARday_mean).multiply(1000)
-  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean));
-
-  // Quadratic solves ciC3 in ppm, using Gamma* converted from Pa to ppm.
-  // a=1, b=2*gamma_ppm+zC3-ca_mean, c=-gamma_ppm*(zC3+2*ca_mean).
-  // Divide the positive root by ca_mean to obtain dimensionless ci/ca.
-  var gamma_ppm = gamma_star_mean.multiply(1e6).divide(Pmean);
-  var bC3 = gamma_ppm.multiply(2).add(zC3).subtract(ca_mean);
-  var cC3 = gamma_ppm.multiply(zC3.multiply(-1).subtract(ca_mean.multiply(2)));
-  // Guard against negative discriminant (numerical noise) by clamping to 0.
-  var disc = bC3.pow(2).subtract(cC3.multiply(4)).max(0);
-  var ciC3_ppm = bC3.multiply(-1).add(disc.sqrt()).divide(2);
-  var cicaC3_mean = ciC3_ppm.divide(ca_mean);
-
-  var cicaC4_mean = ee.Number(p.cicaC4);
-
-  // pi (Pa): cica * ca (umol/mol) * Pmean (Pa) / 1e6
-  var piC3_mean = cicaC3_mean.multiply(ca_mean).multiply(Pmean).divide(1e6);
-  var piC4_mean = cicaC4_mean.multiply(ca_mean).multiply(Pmean).divide(1e6);
-
-  // Quantum yields
-  var QYC3_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC3))
-    .multiply(piC3_mean.subtract(gamma_star_mean))
-    .divide(piC3_mean.add(gamma_star_mean.multiply(2)));
-  var QYC4_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC4));
-
   // Optional FAPAR calibration (enabled through the run controls).
   // Fit paired, quality-screened observations: NDVI^2 = a + b * EVI2 (b > 0).
   // Derive effective endpoints EVI2min = -a/b and EVI2max = (1-a)/b, then
@@ -847,6 +814,45 @@ function computeDiagnostics(running, instant, params) {
       .divide(p.faparFit.max.subtract(p.faparFit.min)).max(0).min(1);
     FAPAR = ee.Number(ee.Algorithms.If(p.faparFit.valid, scaledEVI2, FAPAR));
   }
+
+  // zC3 (R formula, units arranged for the quadratic):
+  //   zC3 = ((1.5*GPPmean2GPPmax*2500*18)/(QRC3*1.26*(1+fresp))) *
+  //         ((s + gamma_psy) * VPDday_mean * PARday_mean * 1000) /
+  //         (s * Rnday_mean * Pmean)
+  // PAR is umol photons/m2/s; 2500 J/g * 18 g/mol gives J/mol H2O.
+  // VPD * 1000 / Pmean is Pa/Pa, so zC3 is umol/mol (ppm).
+  // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
+  // A numerical floor avoids division by zero; flag these non-identifiable cases.
+  var faparFiparValid = FIPAR.gt(1e-9);
+  var faparFiparRatio = FAPAR.divide(FIPAR.max(1e-9));
+  var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
+    .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
+  var zC3 = zCoef.multiply(
+    s_mean.add(p.gamma_psy).multiply(VPDday_mean).multiply(PARday_mean).multiply(1000)
+  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean)).multiply(faparFiparRatio);
+
+  // Quadratic solves ciC3 in ppm, using Gamma* converted from Pa to ppm.
+  // a=1, b=2*gamma_ppm+zC3-ca_mean, c=-gamma_ppm*(zC3+2*ca_mean).
+  // Divide the positive root by ca_mean to obtain dimensionless ci/ca.
+  var gamma_ppm = gamma_star_mean.multiply(1e6).divide(Pmean);
+  var bC3 = gamma_ppm.multiply(2).add(zC3).subtract(ca_mean);
+  var cC3 = gamma_ppm.multiply(zC3.multiply(-1).subtract(ca_mean.multiply(2)));
+  // Guard against negative discriminant (numerical noise) by clamping to 0.
+  var disc = bC3.pow(2).subtract(cC3.multiply(4)).max(0);
+  var ciC3_ppm = bC3.multiply(-1).add(disc.sqrt()).divide(2);
+  var cicaC3_mean = ciC3_ppm.divide(ca_mean);
+
+  var cicaC4_mean = ee.Number(p.cicaC4);
+
+  // pi (Pa): cica * ca (umol/mol) * Pmean (Pa) / 1e6
+  var piC3_mean = cicaC3_mean.multiply(ca_mean).multiply(Pmean).divide(1e6);
+  var piC4_mean = cicaC4_mean.multiply(ca_mean).multiply(Pmean).divide(1e6);
+
+  // Quantum yields
+  var QYC3_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC3))
+    .multiply(piC3_mean.subtract(gamma_star_mean))
+    .divide(piC3_mean.add(gamma_star_mean.multiply(2)));
+  var QYC4_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC4));
 
   // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean
   var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean);
@@ -927,6 +933,8 @@ function computeDiagnostics(running, instant, params) {
     gamma_star_mean:  gamma_star_mean,
     s_mean:           s_mean,
     zC3:              zC3,
+    FAPAR_FIPAR_ratio: faparFiparRatio,
+    FAPAR_FIPAR_valid: faparFiparValid,
     bC3:              bC3,
     cC3:              cC3,
     ciC3_ppm:        ciC3_ppm,
