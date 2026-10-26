@@ -532,6 +532,16 @@ function aggregateModisToMonth(modisFC, monthStart, monthEnd) {
  * @param {Object} config       { scale }
  * @return {ee.FeatureCollection}  sorted by millis
  */
+// Daytime radiation: only shortwave is converted from a 24-hour mean.
+// Temperatures are Celsius on input; vapor pressure ea is kPa.
+function griddedDaytimeRn(swrDaily, daylength, tday, ea, albedo, emSurface, p) {
+  var kelvin = tday.add(273.15);
+  var swDay = swrDaily.multiply(ee.Number(24).divide(daylength));
+  var emAirDay = ee.Number(10).multiply(ea).divide(kelvin).pow(1 / 7).multiply(1.31);
+  return ee.Number(1).subtract(albedo).multiply(swDay)
+    .add(kelvin.pow(4).multiply(p.sb).multiply(emAirDay.subtract(emSurface)));
+}
+
 function assembleForcing(geom, startDate, endDate, config) {
   config = config || {};
   var scale = config.scale || DEFAULTS.sampleScale;
@@ -602,6 +612,8 @@ function assembleForcing(geom, startDate, endDate, config) {
       .add(T_K4.multiply(p.sb).multiply(em_air.subtract(em_sur)));
 
     if (towerRows) Rndaily = f.getNumber('Rndaily');
+    var Rnday = towerRows ? Rndaily.multiply(ee.Number(24).divide(dl))
+      : griddedDaytimeRn(SWRdaily, dl, Tday, ea, albedo, em_sur, p);
     return f.set({
       weather_source: towerRows ? 'tower' : 'gridded',
       doy:       doy,
@@ -617,6 +629,7 @@ function assembleForcing(geom, startDate, endDate, config) {
       albedo:    albedo,
       FIPAR: FIPAR,
       Rndaily:   Rndaily,
+      Rnday:     Rnday,
       // MVP constants
       Pdaily:    towerRows ? f.getNumber('Pdaily') : MVP_CONSTANTS.Pdaily,
       ca_daily:  co2ForDate(monthStart)
@@ -696,7 +709,7 @@ function computeInitialState(forcingList, params) {
     var VPDmax = ee.Number(ee.Algorithms.If(useTowerHumidity, esTmax.subtract(humidityPressure).max(0), esTmax.subtract(esTmin)));
     var VPDday = ee.Number(ee.Algorithms.If(useTowerHumidity, esTday.subtract(humidityPressure).max(0), esTday.subtract(esTmin)));
     var RHmin = humidityPressure.divide(esTmax).max(0).min(1);
-    var Rnday = f.getNumber('Rndaily').multiply(ee.Number(24).divide(dl));
+    var Rnday = f.getNumber('Rnday');
     return f.set({
       Tday: Tday,
       esTmin: esTmin, esTmax: esTmax, esTday: esTday,
@@ -1011,8 +1024,8 @@ function acclimStep(currentFeat, prevState, params) {
   // PARday (umol/m2/s) = 2.2 * SWR(W/m2) * (24/dl)
   var PARday = SWRdaily.multiply(2.2).multiply(ee.Number(24).divide(dl));
 
-  // Rnday (W/m2 over daylight) = Rndaily * (24/dl)
-  var Rnday = Rndaily.multiply(ee.Number(24).divide(dl));
+  // Use source-specific daytime energy prepared in assembleForcing.
+  var Rnday = f.getNumber('Rnday');
 
   // RHmin (fraction)
   var RHmin = humidityPressure.divide(esTmax).max(0).min(1);
