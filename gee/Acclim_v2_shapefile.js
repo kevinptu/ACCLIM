@@ -114,7 +114,7 @@ var ACCLIM_PARAMS = {
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
-  EVI2min:        0.1,     // EVI2 of bare ground
+  EVI2min:        0.15,     // EVI2 of bare ground
   EVI2max:        0.6,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
