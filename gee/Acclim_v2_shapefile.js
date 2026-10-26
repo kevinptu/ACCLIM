@@ -103,6 +103,7 @@
 
 var ACCLIM_PARAMS = {
   faparMethod: 'EVI2',     // NDVI squared or scaled EVI2
+  fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   fitEVI2: false,         // Fit EVI2 bounds against NDVI squared; otherwise use fixed bounds
   k: 0.5,                  // canopy light extinction coefficient for LAI retrieval (must be > 0)
   CUEplant:       0.5,      // total plant NPP / GPP
@@ -810,8 +811,9 @@ function computeDiagnostics(running, instant, params) {
   if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
     FAPAR = FAPAR_in.subtract(p.EVI2min).divide(p.EVI2max - p.EVI2min).max(0).min(1);
   } else if (p.faparMethod === 'EVI2') {
+    var fitRange = ee.Number(ee.Algorithms.If(p.faparFit.valid, p.faparFit.max.subtract(p.faparFit.min), 1));
     var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
-      .divide(p.faparFit.max.subtract(p.faparFit.min)).max(0).min(1);
+      .divide(fitRange).max(0).min(1);
     FAPAR = ee.Number(ee.Algorithms.If(p.faparFit.valid, scaledEVI2, FAPAR));
   }
 
@@ -1495,11 +1497,19 @@ function fitEVI2FAPAR(forcingFC) {
     min: a.multiply(-1).divide(safeB), max: ee.Number(1).subtract(a).divide(safeB)};
 }
 
+// Preserve the regression-derived lower endpoint while fixing the upper endpoint.
+function fixedUpperEVI2Fit(fit) {
+  var upper = ee.Number(0.6);
+  return {a: fit.a, b: fit.b, count: fit.count, min: fit.min, max: upper,
+    valid: ee.Number(fit.valid).and(upper.subtract(fit.min).gt(1e-9))};
+}
+
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
   if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC);
+  if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
       (!isFinite(p.EVI2min) || !isFinite(p.EVI2max) || p.EVI2max <= p.EVI2min)) {
     throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
@@ -1522,7 +1532,7 @@ function runACCLIM(forcingFC, params) {
         FAPAR_EVI2min: p.EVI2min, FAPAR_EVI2max: p.EVI2max});
     } else if (p.faparMethod === 'EVI2') {
       f = f.set({FAPAR_method: ee.Algorithms.If(p.faparFit.valid, 'EVI2', 'NDVI'),
-        FAPAR_fit_status: ee.Algorithms.If(p.faparFit.valid, 'fitted', 'NDVI fallback: insufficient pairs or nonpositive/degenerate slope'),
+        FAPAR_fit_status: ee.Algorithms.If(p.faparFit.valid, p.fitEVI2maxFixed ? 'fitted minimum; fixed maximum 0.6' : 'fitted', 'NDVI fallback: invalid fit or endpoint range'),
         FAPAR_fit_n: p.faparFit.count,
         FAPAR_fit_a: p.faparFit.a, FAPAR_fit_b: p.faparFit.b,
         FAPAR_EVI2min: ee.Algorithms.If(p.faparFit.valid, p.faparFit.min, null),
@@ -2252,7 +2262,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
           ? 'FAPAR = EVI2 scaled between EVI2min=' + bucketInfo.FAPAR_EVI2min.toFixed(3) +
             ' and EVI2max=' + bucketInfo.FAPAR_EVI2max.toFixed(3) +
             ' (' + bucketInfo.FAPAR_fit_status + ')'
-          : 'FAPAR: NDVI² fallback. EVI2 fit needs at least 3 paired months and a positive slope.'));
+          : 'FAPAR: NDVI² fallback. Fit needs at least 3 paired months, a positive slope, and minimum below maximum.'));
       }
       addWeatherCharts(output, result.monthly, regionName);
       var valid = products.daily.filter(function(r) { return carbonFinite(r.NPPdaily); }).length;
@@ -2377,6 +2387,7 @@ UI.runButton = ui.Button({
 
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = EVI2 scaled to NDVI²', value: 'EVI2_FITTED'},
+  {label: 'FAPAR = EVI2 fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
   {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'EVI2_FIXED',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
@@ -2882,7 +2893,7 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {faparMethod: 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED'}, {weatherPlan:UI._runWeatherPlan});
+    var output = runForGeometry(geom, startDate, endDate, {faparMethod: 'EVI2', fitEVI2: UI.faparSelector.getValue() !== 'EVI2_FIXED', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, {weatherPlan:UI._runWeatherPlan});
     UI._lastOutput = output;
     UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
 
