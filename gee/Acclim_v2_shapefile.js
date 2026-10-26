@@ -110,13 +110,14 @@ var ACCLIM_PARAMS = {
   carbonToBiomass: 2.1276, // exact RAP conversion supplied by user (~47% C)
   fANPP_intercept: 0.171,   // fANPP = intercept + slope * MAT (deg C)
   fANPP_slope:    0.0129,
+  tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
-  EVI2min:        0.15,     // EVI2 of bare ground
-  EVI2max:        0.6,     // EVI2 of full green canopy
+  EVI2min:        0.0,     // EVI2 of bare ground
+  EVI2max:        0.83,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
   rho_air:        1.292,    // air density (kg/m3)
@@ -141,9 +142,9 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  ndvi_min: 0.15,
-  ndvi_max: 0.97,
-  ndvi_exp: 1.25
+  ndvi_min: 0,
+  ndvi_max: 1,
+  ndvi_exp: 2
 };
 
 var DATASETS = {
@@ -746,6 +747,8 @@ function computeInitialState(forcingList, params) {
     PARday_mean:  PARday_mean0,
     Rnday_mean:   Rnday_mean0,
     RHmin_mean:   RHmin_mean0,
+    RHmin_sm_mean: RHmin_mean0,
+    VPDmax_sm_mean: VPDmax_mean0,
     // dt/w state
     dt:           1,
     // step counter (so the first call knows it's the seed day)
@@ -932,7 +935,8 @@ function computeDiagnostics(running, instant, params) {
   // ET partitioning
   var s_ratio_mean = s_mean.divide(s_mean.add(p.gamma_psy));
   var fwet_mean = RHmin_mean.pow(10);
-  var fSM_mean = RHmin_mean.pow(VPDmax_mean);
+  var fSM_mean = ee.Number(running.get('RHmin_sm_mean'))
+    .pow(ee.Number(running.get('VPDmax_sm_mean')));
   var PT_mean = ee.Number(p.PT_coef).multiply(s_ratio_mean).multiply(Rnday_mean);
 
   var PredLEcday_mean = PT_mean.multiply(FIPAR).multiply(fcold_mean)
@@ -1044,15 +1048,17 @@ function acclimStep(currentFeat, prevState, params) {
     ee.Algorithms.If(lowLight, dt_prev, dt_supplied)
   ));
   var w = dt.multiply(-1).divide(p.tc).exp();
+  var w_sm = dt.multiply(-1).divide(p.tc_sm).exp();
 
   // Running-mean update closure
-  function updateMean(prevKey, todayVal) {
+  function updateMean(prevKey, todayVal, weight) {
+    weight = weight === undefined ? w : weight;
     var prev = ee.Number(state.get(prevKey));
     return ee.Number(ee.Algorithms.If(
       isFirst, prev,                      // seed value retained on first step
       ee.Algorithms.If(
         lowLight, prev,                   // carry forward
-        w.multiply(prev).add(ee.Number(1).subtract(w).multiply(todayVal))
+        weight.multiply(prev).add(ee.Number(1).subtract(weight).multiply(todayVal))
       )
     ));
   }
@@ -1070,13 +1076,16 @@ function acclimStep(currentFeat, prevState, params) {
   var PARday_mean = updateMean('PARday_mean', PARday);
   var Rnday_mean  = updateMean('Rnday_mean',  Rnday);
   var RHmin_mean  = updateMean('RHmin_mean',  RHmin);
+  var RHmin_sm_mean = updateMean('RHmin_sm_mean', RHmin, w_sm);
+  var VPDmax_sm_mean = updateMean('VPDmax_sm_mean', VPDmax, w_sm);
 
   var runningNow = ee.Dictionary({
     Pmean: Pmean, ca_mean: ca_mean, Tday_mean: Tday_mean,
     Tmin_mean: Tmin_mean, Tmax_mean: Tmax_mean, esTmax_mean: esTmax_mean, esTday_mean: esTday_mean,
     VPDday_mean: VPDday_mean, VPDmax_mean: VPDmax_mean,
     PARday_mean: PARday_mean, Rnday_mean: Rnday_mean,
-    RHmin_mean: RHmin_mean
+    RHmin_mean: RHmin_mean,
+    RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
   var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR')});
 
@@ -1097,7 +1106,7 @@ function acclimStep(currentFeat, prevState, params) {
     // Instantaneous derived
     esTmin: esTmin, esTmax: esTmax, esTday: esTday,
     VPDmax: VPDmax, VPDday: VPDday, PARday: PARday, Rnday: Rnday, RHmin: RHmin,
-    dt: dt, w: w
+    dt: dt, w: w, w_sm: w_sm, tc: p.tc, tc_sm: p.tc_sm
   }).combine(runningNow).combine(diag);
 
   // Daytime mean flux integrated over daylight, zero GPP at night.
@@ -1115,6 +1124,7 @@ function acclimStep(currentFeat, prevState, params) {
     VPDday_mean: VPDday_mean, VPDmax_mean: VPDmax_mean,
     PARday_mean: PARday_mean, Rnday_mean: Rnday_mean,
     RHmin_mean: RHmin_mean,
+    RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean,
     dt: dt,
     step: step.add(1),
     history: ee.List(state.get('history')).add(outFeat)
@@ -1529,6 +1539,7 @@ function runACCLIM(forcingFC, params) {
     throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
   }
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
+  if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   var forcingList = forcingFC.sort('millis').toList(forcingFC.size());
   var initial = computeInitialState(forcingList, p);
   var finalState = ee.Dictionary(forcingList.iterate(function(curr, prev) {
