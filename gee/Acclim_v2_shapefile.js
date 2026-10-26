@@ -104,6 +104,7 @@
 var ACCLIM_PARAMS = {
   faparMethod: 'EVI2',     // NDVI squared or scaled EVI2
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
+  useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
   fitEVI2: false,         // Fit EVI2 bounds against FIPAR; otherwise use fixed bounds
   k: 0.5,                  // canopy light extinction coefficient for LAI retrieval (must be > 0)
   CUEplant:       0.5,      // total plant NPP / GPP
@@ -769,6 +770,21 @@ function computeFIPAR(ndvi, p) {
  * today's instantaneous values. Pure function of inputs; no side effects.
  * Returns a dictionary of all derived quantities to attach to the output feature.
  */
+function photosyntheticFAPAR(instant, p) {
+  var FAPAR_in = ee.Number(instant.get('EVI2'));
+  var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
+  if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
+    FAPAR = FAPAR_in.subtract(p.EVI2min).divide(p.EVI2max - p.EVI2min).max(0).min(1);
+  } else if (p.faparMethod === 'EVI2') {
+    var fitRange = ee.Number(ee.Algorithms.If(p.faparFit.valid, p.faparFit.max.subtract(p.faparFit.min), 1));
+    var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
+      .divide(fitRange).max(0).min(1);
+    FAPAR = ee.Number(ee.Algorithms.If(p.faparFit.valid, scaledEVI2, FAPAR));
+  }
+
+  return FAPAR;
+}
+
 function computeDiagnostics(running, instant, params) {
   var p = params;
 
@@ -823,15 +839,7 @@ function computeDiagnostics(running, instant, params) {
 
   // FAPAR from squared NDVI, using the current monthly NDVI input.
   var FIPAR = ee.Number(instant.get('FIPAR'));
-  var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
-  if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
-    FAPAR = FAPAR_in.subtract(p.EVI2min).divide(p.EVI2max - p.EVI2min).max(0).min(1);
-  } else if (p.faparMethod === 'EVI2') {
-    var fitRange = ee.Number(ee.Algorithms.If(p.faparFit.valid, p.faparFit.max.subtract(p.faparFit.min), 1));
-    var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
-      .divide(fitRange).max(0).min(1);
-    FAPAR = ee.Number(ee.Algorithms.If(p.faparFit.valid, scaledEVI2, FAPAR));
-  }
+  var FAPAR = photosyntheticFAPAR(instant, p);
 
   // zC3 (R formula, units arranged for the quadratic):
   //   zC3 = ((1.5*GPPmean2GPPmax*2500*18)/(QRC3*1.26*(1+fresp))) *
@@ -842,7 +850,7 @@ function computeDiagnostics(running, instant, params) {
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
   var faparFiparValid = FIPAR.gt(1e-9);
-  var faparFiparRatio = FAPAR.divide(FIPAR.max(1e-9));
+  var faparFiparRatio = p.useSharedFPAR ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
   var zC3 = zCoef.multiply(
@@ -971,6 +979,7 @@ function computeDiagnostics(running, instant, params) {
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR,
     FIPAR:            FIPAR,
+    FPAR_mode: p.useSharedFPAR ? 'shared FAPAR' : 'separate FAPAR/FIPAR',
     GPPmax_C3:        GPPmax_C3,
     GPPmax_C4:        GPPmax_C4,
     GPPday_mean_C3:   GPPday_mean_C3,
@@ -1103,6 +1112,7 @@ function acclimStep(currentFeat, prevState, params) {
     SWRdaily: SWRdaily, Pdaily: Pdaily, Rndaily: Rndaily,
     precip: f.get('precip'), period_days: f.get('period_days'),
     ca_daily: ca_daily, EVI2: EVI2, NDVI: NDVI, daylength: dl,
+    FIPAR_NDVI: p.useSharedFPAR ? f.get('FIPAR_NDVI') : f.get('FIPAR'),
     // Instantaneous derived
     esTmin: esTmin, esTmax: esTmax, esTday: esTday,
     VPDmax: VPDmax, VPDday: VPDday, PARday: PARday, Rnday: Rnday, RHmin: RHmin,
@@ -1528,6 +1538,23 @@ function fixedUpperEVI2Fit(fit) {
     valid: ee.Number(fit.valid).and(upper.subtract(fit.min).gt(1e-9))};
 }
 
+// Called after fitting, before initialization: use the same fraction everywhere.
+function applySharedFPAR(f, p) {
+  var rawFIPAR = f.getNumber('FIPAR');
+  var shared = photosyntheticFAPAR(f, p);
+  var emSurface = shared.multiply(p.em_v).add(ee.Number(1).subtract(shared).multiply(p.em_nv));
+  var kelvin = f.getNumber('Tdaily').add(273.15);
+  var emAir = ee.Number(10).multiply(f.getNumber('ea')).divide(kelvin).pow(1 / 7).multiply(1.31);
+  var rnDaily = ee.Number(1).subtract(f.getNumber('albedo')).multiply(f.getNumber('SWRdaily'))
+    .add(kelvin.pow(4).multiply(p.sb).multiply(emAir.subtract(emSurface)));
+  var rnDay = griddedDaytimeRn(f.getNumber('SWRdaily'), f.getNumber('daylength'),
+    f.getNumber('Tday'), f.getNumber('ea'), f.getNumber('albedo'), emSurface, p);
+  var tower = ee.Algorithms.IsEqual(f.get('weather_source'), 'tower');
+  return f.set({FIPAR_NDVI: rawFIPAR, FIPAR: shared,
+    Rndaily: ee.Algorithms.If(tower, f.get('Rndaily'), rnDaily),
+    Rnday: ee.Algorithms.If(tower, f.get('Rnday'), rnDay)});
+}
+
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
@@ -1540,6 +1567,7 @@ function runACCLIM(forcingFC, params) {
   }
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
+  if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
   var forcingList = forcingFC.sort('millis').toList(forcingFC.size());
   var initial = computeInitialState(forcingList, p);
   var finalState = ee.Dictionary(forcingList.iterate(function(curr, prev) {
@@ -2418,6 +2446,8 @@ UI.faparSelector = ui.Select({items: [
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+UI.sharedFPAR = ui.Checkbox({label: 'Use FAPAR for both photosynthesis and water fluxes', value: false});
+UI.inputPanel.add(UI.sharedFPAR);
 setupTowerImport();
 UI.inputPanel.add(UI.runButton);
 
@@ -2919,7 +2949,7 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {faparMethod: 'EVI2', fitEVI2: UI.faparSelector.getValue() !== 'EVI2_FIXED', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, {weatherPlan:UI._runWeatherPlan});
+    var output = runForGeometry(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: 'EVI2', fitEVI2: UI.faparSelector.getValue() !== 'EVI2_FIXED', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, {weatherPlan:UI._runWeatherPlan});
     UI._lastOutput = output;
     UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
 

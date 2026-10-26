@@ -19,13 +19,13 @@ for (const path of paths) {
  assert(s.includes("FIPAR: f.getNumber('FIPAR')"));
  assert(s.includes("var FIPAR = ee.Number(instant.get('FIPAR'));"));
  assert(s.includes('var em_sur = FIPAR.multiply(p.em_v)'));
- const faparBlock=s.slice(s.indexOf("  var FAPAR = ee.Number(instant.get('NDVI')).pow(2);"),s.indexOf('  // zC3 (R formula'));
+ vm.runInContext(s.slice(s.indexOf('function photosyntheticFAPAR('),s.indexOf('function computeDiagnostics(')),ctx);
  ctx.ee.Algorithms={If:(c,a,b)=>c?a:b};
  function fapar(method,fit,evi,valid=true){
    Object.assign(ctx.p,{faparMethod:method,fitEVI2:fit,EVI2min:.1,EVI2max:.8});
    ctx.p.faparFit=fit?{min:new N(.2),max:new N(.6),valid}:undefined;
-   ctx.instant={get:()=>.5}; ctx.FAPAR_in=new N(evi);
-   vm.runInContext(faparBlock,ctx);return ctx.FAPAR.v;
+   ctx.instant={get:k=>k==='EVI2'?evi:.5}; ctx.FAPAR_in=new N(evi);
+   return ctx.photosyntheticFAPAR(ctx.instant,ctx.p).v;
  }
  assert(Math.abs(fapar('EVI2',false,.45)-.5)<1e-12);
  assert.equal(fapar('EVI2',false,0),0); assert.equal(fapar('EVI2',false,1),1);
