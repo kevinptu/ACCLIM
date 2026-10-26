@@ -15,7 +15,7 @@ for (const path of paths) {
  for(const ndvi of [-.2,.15,.5,.97,1]) assert(Math.abs(ctx.computeFIPAR(ndvi,ctx.p).v-(Math.max(0,ndvi-.15)/.82)**1.25)<1e-12);
  assert(!s.includes('greencover'));
  assert(!s.includes('fipar_ndvi_'));
- assert.strictEqual((s.match(/computeFIPAR\(/g)||[]).length,2); // Definition and single forcing calculation.
+ assert.strictEqual((s.match(/computeFIPAR\(/g)||[]).length,3); // Shared definition, forcing calculation, and calibration target.
  assert(s.includes("FIPAR: f.getNumber('FIPAR')"));
  assert(s.includes("var FIPAR = ee.Number(instant.get('FIPAR'));"));
  assert(s.includes('var em_sur = FIPAR.multiply(p.em_v)'));
@@ -46,4 +46,5 @@ for (const path of paths) {
  assert(waterTail.includes('ee.Dictionary({FIPAR: 0,'));
 }
 console.log('PASS FIPAR endpoints, exact formula, water partition independence from FAPAR, photosynthesis preservation, and both script syntaxes');
+
 
