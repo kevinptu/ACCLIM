@@ -10,7 +10,7 @@ for(const source of ['gridded','tower']){
  const result=ctx.applySharedFPAR(f,{em_v:.97,em_nv:.92,sb:5.67e-8});assert.equal(result.FIPAR.v,.7);assert.equal(result.FIPAR_NDVI.v,.4);
  if(source==='tower'){assert.equal(result.Rnday,200);assert.equal(result.Rndaily,100);}else{assert(Number.isFinite(result.Rnday.v));assert.notEqual(result.Rnday.v,200);}
 }
-assert(s.includes('p.useSharedFPAR ? ee.Number(1) : FAPAR.divide'));
+assert(s.includes("(p.useSharedFPAR || p.faparMethod === 'FIPAR') ? ee.Number(1) : FAPAR.divide"));
 assert(s.indexOf('p.faparFit = fitEVI2FAPAR')<s.indexOf('if (p.useSharedFPAR) forcingFC'));
 }
 console.log('PASS shared fraction, preserved raw FIPAR, gridded radiation update, unchanged tower energy and fitting order');

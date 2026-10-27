@@ -32,6 +32,10 @@ for (const path of paths) {
  assert(Math.abs(fapar('EVI2',true,.4)-.5)<1e-12);
  assert.equal(fapar('EVI2',true,.4,false),.25);
  assert.equal(fapar('NDVI',false,.4),.25);
+ for (const fraction of [0,.3,1]) {
+   const input={get:k=>{assert.equal(k,'FIPAR');return fraction;}};
+   assert.equal(ctx.photosyntheticFAPAR(input,{faparMethod:'FIPAR'}).v,fraction);
+ }
  assert(s.includes("p.fitEVI2 && !p.faparFit"));
  assert(s.includes("overrides.faparMethod==='EVI2' && overrides.fitEVI2"));
  const block=s.slice(s.indexOf('  var PredLEcday_mean ='),s.indexOf('  return ee.Dictionary',s.indexOf('  var PredLEcday_mean =')));

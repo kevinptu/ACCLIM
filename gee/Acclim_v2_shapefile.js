@@ -771,6 +771,7 @@ function computeFIPAR(ndvi, p) {
  * Returns a dictionary of all derived quantities to attach to the output feature.
  */
 function photosyntheticFAPAR(instant, p) {
+  if (p.faparMethod === 'FIPAR') return ee.Number(instant.get('FIPAR'));
   var FAPAR_in = ee.Number(instant.get('EVI2'));
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
@@ -850,7 +851,7 @@ function computeDiagnostics(running, instant, params) {
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
   var faparFiparValid = FIPAR.gt(1e-9);
-  var faparFiparRatio = p.useSharedFPAR ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
+  var faparFiparRatio = (p.useSharedFPAR || p.faparMethod === 'FIPAR') ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
   var zC3 = zCoef.multiply(
@@ -1558,7 +1559,7 @@ function applySharedFPAR(f, p) {
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2') throw new Error('Unknown FAPAR method.');
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -1591,7 +1592,7 @@ function runACCLIM(forcingFC, params) {
         FAPAR_fit_a: p.faparFit.a, FAPAR_fit_b: p.faparFit.b,
         FAPAR_EVI2min: ee.Algorithms.If(p.faparFit.valid, p.faparFit.min, null),
         FAPAR_EVI2max: ee.Algorithms.If(p.faparFit.valid, p.faparFit.max, null)});
-    } else { f = f.set({FAPAR_method: 'NDVI', FAPAR_fit_status: 'not requested'}); }
+    } else { f = f.set({FAPAR_method: p.faparMethod, FAPAR_fit_status: 'not requested'}); }
     f = addPotentialFluxDiagnostics(f, p);
     f = addTemperatureDiagnostics(f, p);
     var factor = f.getNumber('daylength').multiply(3600).divide(2450000);
@@ -2440,6 +2441,7 @@ UI.runButton = ui.Button({
 });
 
 UI.faparSelector = ui.Select({items: [
+  {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
   {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'EVI2_FIXED',
@@ -2949,7 +2951,7 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: 'EVI2', fitEVI2: UI.faparSelector.getValue() !== 'EVI2_FIXED', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, {weatherPlan:UI._runWeatherPlan});
+    var output = runForGeometry(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: UI.faparSelector.getValue() === 'FIPAR' ? 'FIPAR' : 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, {weatherPlan:UI._runWeatherPlan});
     UI._lastOutput = output;
     UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
 
