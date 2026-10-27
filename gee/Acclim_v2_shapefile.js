@@ -466,17 +466,17 @@ function griddedDaytimeRn(swrDaily, daylength, tday, ea, albedo, emSurface, p, p
 // Dataset adapters. Weather is sampled at its native grid; reflectance at 30/250 m.
 // These settings are research choices, not claims about observed revisit intervals.
 var WEATHER_SOURCES = {
-  TERRACLIMATE: {label:'TerraClimate (global / ~4.6 km / monthly)', id:'IDAHO_EPSCOR/TERRACLIMATE', daily:false, scale:4638},
-  ERA5: {label:'ERA5-Land (global / ~11 km / daily)', id:'ECMWF/ERA5_LAND/DAILY_AGGR', daily:true, scale:11132},
-  GRIDMET: {label:'GRIDMET (contiguous US / ~4 km / daily)', id:'IDAHO_EPSCOR/GRIDMET', daily:true, scale:4638}
+  TERRACLIMATE: {label:'TerraClimate (global/4.6km/monthly)', id:'IDAHO_EPSCOR/TERRACLIMATE', daily:false, scale:4638},
+  ERA5: {label:'ERA5-Land (global/11km/daily)', id:'ECMWF/ERA5_LAND/DAILY_AGGR', daily:true, scale:11132},
+  GRIDMET: {label:'GRIDMET (contiguous US/4km/daily)', id:'IDAHO_EPSCOR/GRIDMET', daily:true, scale:4638}
 };
 var SATELLITE_SOURCES = {
-  LANDSAT8: {label:'Landsat (global / 30 m / 8-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_8DAY'], days:8, scale:30, gap:32, kind:'landsat'},
-  LANDSAT32: {label:'Landsat (global / 30 m / 32-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_32DAY'], days:32, scale:30, gap:64, kind:'landsat'},
-  HLS: {label:'HLS Landsat + Sentinel (global / 30 m / combined observations)', ids:['NASA/HLS/HLSL30/v002','NASA/HLS/HLSS30/v002'], days:1, scale:30, gap:32, kind:'hls'},
-  MODIS1: {label:'MODIS Terra + Aqua (global / 250 m / daily)', ids:['MODIS/061/MOD09GQ','MODIS/061/MYD09GQ'], days:1, scale:250, gap:32, kind:'gq'},
-  MODIS8: {label:'MODIS Terra + Aqua (global / 250 m / 8-day)', ids:['MODIS/061/MOD09Q1','MODIS/061/MYD09Q1'], days:8, scale:250, gap:32, kind:'q1'},
-  MODIS16: {label:'MODIS Terra + Aqua (global / 250 m / 16-day)', ids:['MODIS/061/MOD13Q1','MODIS/061/MYD13Q1'], days:16, scale:250, gap:48, kind:'vi'}
+  LANDSAT8: {label:'Landsat (global/30m/8-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_8DAY'], days:8, scale:30, gap:32, kind:'landsat'},
+  LANDSAT32: {label:'Landsat (global/30m/32-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_32DAY'], days:32, scale:30, gap:64, kind:'landsat'},
+  HLS: {label:'HLS (global/30m/daily)', ids:['NASA/HLS/HLSL30/v002','NASA/HLS/HLSS30/v002'], days:1, scale:30, gap:32, kind:'hls'},
+  MODIS1: {label:'MODIS (global/250m/daily)', ids:['MODIS/061/MOD09GQ','MODIS/061/MYD09GQ'], days:1, scale:250, gap:32, kind:'gq'},
+  MODIS8: {label:'MODIS (global/250m/8-day)', ids:['MODIS/061/MOD09Q1','MODIS/061/MYD09Q1'], days:8, scale:250, gap:32, kind:'q1'},
+  MODIS16: {label:'MODIS (global/250m/16-day)', ids:['MODIS/061/MOD13Q1','MODIS/061/MYD13Q1'], days:16, scale:250, gap:48, kind:'vi'}
 };
 // One temporal contract for every weather adapter. Flux density is kept separate
 // from mass integrated over the represented weather interval.
@@ -2291,6 +2291,20 @@ function aggregateModelMonths(rows) {
     return result;
   });
 }
+// Chart-only monthly means; daily values remain the source for exports and totals.
+function monthlyNPPChartRows(daily) {
+  var groups={};
+  daily.forEach(function(r){var key=r.date.slice(0,7);if(!groups[key])groups[key]=[];groups[key].push(r);});
+  return Object.keys(groups).sort().map(function(key){
+    var out={date:key+'-01'};
+    ['NPPdaily','NPPgrass','NPPshrub','NPPtree'].forEach(function(field){
+      var valid=groups[key].filter(function(r){return carbonFinite(r[field]);});
+      out[field]=valid.length?valid.reduce(function(sum,r){return sum+r[field];},0)/valid.length:null;
+    });
+    return out;
+  });
+}
+
 function carbonSummaryRows(daily,annual) {
   var groups={};daily.forEach(function(r){var key=r.date.slice(0,annual?4:7);if(!groups[key])groups[key]=[];groups[key].push(r);});
   return Object.keys(groups).sort().map(function(k) {
@@ -2764,13 +2778,13 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       UI._lastCarbonMonthly=carbonRowsToFC(carbonSummaryRows(products.daily,false));
       if (UI._annualGPPNote) UI._annualGPPNote.setValue(annualCarbonNote(products.daily, ['GPPdaily'], ['GPP']));
       UI._last16day = carbonRowsToFC(products.npp16day);
-      addOptionalSeriesChart({rows: products.daily},
+      addOptionalSeriesChart({rows: monthlyNPPChartRows(products.daily)},
         ['NPPdaily', 'NPPgrass', 'NPPshrub', 'NPPtree'],
         ['NPPeco', 'NPPgrass', 'NPPshrub', 'NPPtree'],
         ['#000000', '#2E7D32', '#EF6C00', '#1976D2'], [1, 2, 3], {
-          title: regionChartTitle('Daily NPP', regionName), chartArea: {top: 80},
+          title: regionChartTitle('NPP (monthly mean daily)', regionName), chartArea: {top: 80},
           hAxis: {title: 'Date'}, vAxis: {title: 'g C/m2/day'}, lineWidth: 1.5, pointSize: 0
-        }, annualCarbonNote);
+        }, function(rows, fields, labels) { return annualCarbonNote(products.daily, fields, labels); });
       var hasBiomass = products.npp16day.some(function(r) { return carbonFinite(r.HerbaceousAGB16day) || carbonFinite(r.HerbaceousBGB16day); });
       if (hasBiomass) {
         // Chart-only Jan 1 anchors show zero before that day's production.
