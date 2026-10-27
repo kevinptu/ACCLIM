@@ -713,7 +713,12 @@ function assembleSelectedForcing(geom,start,end,config) {
     var vi=satellite.filter(ee.Filter.gte('millis',t)).filter(ee.Filter.lt('millis',t.add(days.multiply(86400000))));
     var valid=vi.filter(ee.Filter.notNull(['red','nir']));
     var props=ee.Dictionary({});
-    ['red','nir','NDVI','EVI2','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){props=props.set(k,vi.aggregate_mean(k));});
+    // Unavailable satellite periods have null means; Dictionary.set rejects null.
+    // Omit those properties so the existing completeness check flags the period.
+    ['red','nir','NDVI','EVI2','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){
+      var mean=vi.aggregate_mean(k);
+      props=ee.Dictionary(ee.Algorithms.If(ee.Algorithms.IsEqual(mean,null),props,props.set(k,mean)));
+    });
     var dl=ee.Number(ee.List.sequence(0,days.subtract(1)).map(function(i){
       return astronomicalDaylength(lat,doyFromDate(ee.Date(t).advance(i,'day')));
     }).reduce(ee.Reducer.mean()));
