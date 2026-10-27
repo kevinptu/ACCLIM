@@ -68,3 +68,11 @@ Weather units: https://fluxnet.org/data/aboutdata/data-variables/
 ### Tower LE_CORR overlay
 
 The Evapotranspiration chart offers **Add Tower LE_CORR**, independently of the Use Tower Weather Data checkbox. Reprocess the source CSV/ZIP to include daily LE_CORR sums/counts; older JSON without those fields leaves this series unavailable. It uses all available 24-hour intervals, including night, negative fluxes and supplied gap-filled values. The selected-date mean in W/m² is multiplied by 86400 / 2450000 to give equivalent mm/day (the same latent heat constant as the model). No daylight multiplier is applied and no coverage cutoff is imposed on this observation series. Its missing percentage uses supplied intervals; absent timestamps and partial-month coverage remain separately reported. The complete-weather rule for model forcing is unchanged. The monthly export includes TowerLE_CORR_mm_day, valid count and missing percentage.
+
+## Tower weather timestep
+
+After preparing the comparison, select **Tower weather timestep**: daily, weekly, or monthly. Newly processed files default to daily. Save summary JSON preserves daily meteorology for later selections. Older monthly-only saved summaries must be regenerated from the source CSV/ZIP for finer timesteps. Copy the selected output into ACCLIM and enable **Use Tower Weather Data**. This remains optional.
+
+Charts follow the selected weather timestep. Tower GPP and LE observations are pooled over the same model intervals from valid source records; missing percentages remain available. Weekly blocks are January-1 anchored, with a shorter final block at year end. See [temporal processing](../docs/data-sources.md#selectable-tower-weather-timesteps) for weather completeness, aggregation and runtime details.
+
+Regression checks: `node tests/tower_cadence.cjs` and `node tests/tower_cadence_ui.cjs` verify daily retention, all three timesteps, leap years, rainfall conservation, missing weather, JSON compatibility and importer controls.

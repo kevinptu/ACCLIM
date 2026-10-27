@@ -1,0 +1,22 @@
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),core=require('../docs/tower-core.js');
+const html=fs.readFileSync('docs/tower-csv-importer.html','utf8'),ids=new Set([...html.matchAll(/id="([^"]+)"/g)].map(m=>m[1]));
+const nodes={},make=()=>({value:'',textContent:'',hidden:false,disabled:false,append(){},replaceChildren(){},add(){},addEventListener(){},select(){},focus(){},click(){}});
+for(const id of ids)nodes[id]=make();
+let saved;
+const c={TowerCore:core,Blob,console,setTimeout:()=>{},URL:{createObjectURL:b=>{saved=b;return 'blob:test';},revokeObjectURL(){}},document:{getElementById:id=>{assert(ids.has(id),'Missing HTML control '+id);return nodes[id];},createElement:make}};
+vm.createContext(c);vm.runInContext(fs.readFileSync('docs/tower-ui.js','utf8'),c);
+const lines=['TIMESTAMP_START,TIMESTAMP_END,GPP_DT_VUT_REF,SW_IN_F,TA_F,VPD_F,PA_F,P_F,LE_CORR,H_CORR'];
+const stamp=t=>new Date(t).toISOString().replace(/[-:T]/g,'').slice(0,12),start=Date.UTC(2024,0,1);
+for(let i=0;i<48;i++){const t=start+i*1800000;lines.push([stamp(t),stamp(t+1800000),10,200,20,10,90,0,100,50].join(','));}
+const data=core.parse(lines.join('\n'),'FLX_US-Test_FULLSET_HH_2024.csv');
+c.receive({data:{request:0,type:'result',data}});
+assert.equal(nodes.weatherCadence.value,'daily');assert.equal(JSON.parse(nodes.result.value).weather.periods.length,1);
+nodes.weatherCadence.value='weekly';nodes.weatherCadence.onchange();assert.equal(JSON.parse(nodes.result.value).weather.cadence,'weekly');
+nodes.download.onclick();assert(saved);
+(async()=>{
+ const full=JSON.parse(await saved.text());assert.equal(full.weather.daily.length,1);assert.equal(full.weather.cadence,'weekly');
+ const old=JSON.parse(JSON.stringify(data));delete old.weather.daily;delete old.weather.cadence;
+ c.receive({data:{request:0,type:'result',data:old}});assert.equal(nodes.weatherCadence.value,'monthly');
+ nodes.weatherCadence.value='daily';nodes.weatherCadence.onchange();assert.equal(nodes.copy.disabled,true);assert(nodes.transferNote.textContent.includes('Reprocess'));
+ console.log('PASS importer controls, cadence changes, saved daily weather, and monthly-only JSON guidance');
+})().catch(e=>{console.error(e);process.exitCode=1;});

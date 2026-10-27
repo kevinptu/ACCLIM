@@ -26,7 +26,14 @@ function create(header,selected,sw,num,quanterra){
    for(const k of fields){m.counts[k]=(m.counts[k]||0)+d[k].n;m.sums[k]=(m.sums[k]||0)+d[k].sum;}
    if(d.ta.n===perDay){m.tmin+=d.min;m.tmax+=d.max;m.tempDays++;}
   }
-  return {version:2,energyBasis:'LE_CORR + H_CORR',source,policy:'complete_calendar_month',units:{Tmin:'degC',Tmax:'degC',Tdaily:'degC',SWRdaily:'W/m2',ea:'kPa',Pdaily:'kPa',precip:'mm/month',Rndaily:'W/m2'},months:Object.values(months).sort((a,b)=>a.month.localeCompare(b.month)).map(m=>{
+  const daily=Object.entries(days).sort(([a],[b])=>a.localeCompare(b)).map(([date,d])=>{
+   const counts=Object.fromEntries(fields.map(k=>[k,d[k].n]));
+   const mean=k=>d[k].n===perDay?d[k].sum/perDay:null;
+   return {date,period_days:1,expected:perDay,counts,complete:fields.every(k=>counts[k]===perDay),
+    Tmin:counts.ta===perDay?d.min:null,Tmax:counts.ta===perDay?d.max:null,Tdaily:mean('ta'),
+    SWRdaily:mean('sw'),ea:mean('ea'),Pdaily:mean('pa'),precip:counts.rain===perDay?d.rain.sum:null,Rndaily:mean('rn')};
+  });
+  return {daily,cadence:'daily',version:2,energyBasis:'LE_CORR + H_CORR',source,policy:'complete_calendar_period',units:{Tmin:'degC',Tmax:'degC',Tdaily:'degC',SWRdaily:'W/m2',ea:'kPa',Pdaily:'kPa',precip:'mm/period',Rndaily:'W/m2'},months:Object.values(months).sort((a,b)=>a.month.localeCompare(b.month)).map(m=>{
    const [y,mo]=m.month.split('-').map(Number),nDays=new Date(Date.UTC(y,mo,0)).getUTCDate(),expected=nDays*perDay;
    const complete=fields.every(k=>m.counts[k]===expected)&&m.tempDays===nDays;
    const mean=k=>m.counts[k]===expected?m.sums[k]/expected:null;
@@ -35,5 +42,29 @@ function create(header,selected,sw,num,quanterra){
  }
  return {add,finish,checkUnits,source};
 }
-const api={options,create};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TowerWeather=api;
+// Weekly blocks start January 1; the last block ends at the year boundary.
+function periods(weather,cadence,start,end,intervalMinutes){
+ if(!['daily','weekly','monthly'].includes(cadence))throw Error('Choose daily, weekly or monthly tower weather.');
+ if(cadence==='monthly')return weather.months.filter(m=>m.month>=start.slice(0,7)&&m.month<=end.slice(0,7)).map(m=>{
+  const date=m.month+'-01',a=Date.parse(date+'T00:00:00Z'),d=new Date(a),b=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1);
+  return {...m,date,period_days:(b-a)/86400000};
+ });
+ if(!Array.isArray(weather.daily))throw Error('This saved JSON contains only monthly weather. Reprocess the original CSV/ZIP for daily or weekly inputs.');
+ const byDate=Object.fromEntries(weather.daily.map(d=>[d.date,d])),out=[];
+ let a=Date.parse(start+'T00:00:00Z'),stop=Date.parse(end+'T00:00:00Z');
+ if(cadence==='weekly'){const y=Date.UTC(new Date(a).getUTCFullYear(),0,1);a=y+Math.floor((a-y)/604800000)*604800000;}
+ for(;a<=stop;){
+  const b=cadence==='daily'?a+86400000:Math.min(a+604800000,Date.UTC(new Date(a).getUTCFullYear()+1,0,1));
+  const dates=[];for(let t=a;t<b;t+=86400000)dates.push(new Date(t).toISOString().slice(0,10));
+  const rows=dates.map(d=>byDate[d]),n=dates.length,expected=n*1440/intervalMinutes,counts={};
+  for(const k of fields)counts[k]=rows.reduce((sum,r)=>sum+(r&&r.counts?r.counts[k]||0:0),0);
+  const r={date:dates[0],period_days:n,expected,counts,complete:rows.every(d=>d&&d.complete)&&fields.every(k=>counts[k]===expected)};
+  for(const k of ['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip','Rndaily']){
+   r[k]=rows.every(d=>d&&Number.isFinite(d[k]))?rows.reduce((sum,d)=>sum+d[k],0)/(k==='precip'?1:n):null;
+  }
+  out.push(r);a=b;
+ }
+ return out;
+}
+const api={options,create,periods};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TowerWeather=api;
 })(typeof self!=='undefined'?self:globalThis);

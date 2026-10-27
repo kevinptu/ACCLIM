@@ -164,12 +164,18 @@ function restoreSummary(text) {
   d.site=String(d.site||'Tower');d.start=valid[0].date;d.end=valid.at(-1).date;
   d.months=monthly(d,d.daily[0].date,d.daily.at(-1).date);return d;
 }
-function transferSummary(data,start,end){
+function transferSummary(data,start,end,cadence){
   if(!start||!end||start>end)throw Error('Choose a valid comparison date range.');
   const daily=data.daily.filter(r=>r.date>=start&&r.date<=end).map(r=>Object.fromEntries(['date','sum','n','secondSum','secondN','daylight','total','unknownLight','absent','leSum','leN'].map(k=>[k,r[k]])));
   if(!daily.some(r=>r.n||r.secondN))throw Error('No valid daytime GPP in the selected date range.');
   const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance','leVariable'])out[k]=data[k];
-  if(data.weather)out.weather={...data.weather,months:data.weather.months.filter(m=>m.month>=start.slice(0,7)&&m.month<=end.slice(0,7))};
+  if(data.weather){
+    cadence=cadence||data.weather.cadence||'monthly';
+    const periods=weatherTools.periods(data.weather,cadence,start,end,data.intervalMinutes);
+    out.weather={version:data.weather.version,energyBasis:data.weather.energyBasis,source:data.weather.source,
+      policy:'complete_calendar_period',units:{...data.weather.units,precip:'mm/period'},cadence,periods,
+      months:data.weather.months.filter(m=>m.month>=start.slice(0,7)&&m.month<=end.slice(0,7))};
+  }
   out.daily=daily;out.start=start;out.end=end;return out;
 }
 const api={restoreSummary,transferSummary,csv,num,timestamp,inspect,metadata,monthly,parse,archiveList,fluxFiles,archiveRead};

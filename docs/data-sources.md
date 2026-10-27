@@ -1,6 +1,6 @@
 # Weather, reflectance, and temporal processing
 
-The weather selector controls model cadence: TerraClimate runs monthly; ERA5-Land and GRIDMET run daily. Satellite cadence does not determine the model timestep. Charts comparing tower monthly summaries use monthly summaries of daily model output; the native CSV retains the daily simulation.
+The weather selector controls model cadence: TerraClimate runs monthly; ERA5-Land and GRIDMET run daily. Satellite cadence does not determine the model timestep. Charts retain the native model timestep, including GPP, NPP, water fluxes, soil moisture, physiology and biomass production. Tower observations are averaged from their daily record statistics over each model interval. The monthly and 16-day CSVs remain explicit reporting products; they do not set chart cadence.
 
 ## Weather variables
 
@@ -83,3 +83,17 @@ Each row carries `period_seconds`, `daylight_seconds`, interval start/end timest
 Initialization uses a fixed five-day window rather than five records. Daily inputs retain the original five-day convention; monthly inputs use the first monthly value over that window. Low-light periods hold the physiological state without holding the elapsed-time clock.
 
 Daily and monthly predictions need not be identical: evaluating nonlinear equations with monthly mean weather differs from aggregating daily evaluations. The shared duration contract removes inconsistent unit conversions, not this aggregation effect. Subdaily weather ingestion is not yet offered in the interface.
+
+## Selectable tower-weather timesteps
+
+The importer retains full-day daily meteorology from the supplied half-hourly/hourly CSV. After preparing a comparison, choose **Tower weather timestep**: daily (default for newly processed data), weekly, or monthly. The copy payload passes that cadence to ACCLIM. **Use Tower Weather Data** remains optional; when enabled, its chosen cadence overrides the gridded-weather selector.
+
+Daily temperature extrema come from each day's supplied records. Weekly/monthly Tmin and Tmax are means of daily extrema; mean temperature, shortwave, actual vapor pressure, pressure and LE_CORR + H_CORR are full-day means. Precipitation is summed. Weekly blocks start January 1, span seven days, and end at December 31 with a shorter final block. Boundary weeks/months retain their full calendar period even when the selected comparison begins inside it; carbon reporting is restricted to the requested dates.
+
+Every required weather variable must have all expected source intervals within a model period. Missing or absent days make the affected period unavailable. Supplied gap-filled fields remain preferred; no gridded substitute is introduced. Existing bucket-only bridging still applies, without inventing missing carbon predictions.
+
+Saved JSON retains daily weather and monthly quality/context summaries, regardless of the selected transfer cadence. To use daily or weekly weather with an older monthly-only JSON, process the original CSV/ZIP again through the standard importer. Changing the selector thereafter does not require parsing the CSV again.
+
+The daily copy payload is larger and the model performs more updates. In a synthetic one-year fixture, complete transfers were approximately 148 KB daily, 70 KB weekly and 59 KB monthly (including tower GPP statistics). A one-month Earth Engine smoke test took approximately 7 seconds daily and 4 seconds weekly/monthly; these are illustrative, not performance guarantees.
+
+NPP charts show mean daily carbon flux at each native weather period. Biomass production charts similarly show mean lb dry matter/acre/day; cumulative aboveground production is the end-of-period accumulation. Their source daily allocations, annual totals, and explicit 16-day CSV remain available. Monthly model exports from weekly runs allocate interval totals by calendar-day overlap rather than rerunning monthly physiology.
