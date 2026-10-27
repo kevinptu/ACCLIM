@@ -165,9 +165,11 @@ function restoreSummary(text) {
   d.months=monthly(d,d.daily[0].date,d.daily.at(-1).date);return d;
 }
 function transferSummary(data,start,end,cadence){
-  if(!start||!end||start>end)throw Error('Choose a valid comparison date range.');
+  weatherTools.validateRange(start,end);
   const daily=data.daily.filter(r=>r.date>=start&&r.date<=end).map(r=>Object.fromEntries(['date','sum','n','secondSum','secondN','daylight','total','unknownLight','absent','leSum','leN'].map(k=>[k,r[k]])));
   if(!daily.some(r=>r.n||r.secondN))throw Error('No valid daytime GPP in the selected date range.');
+  const first=data.daily[0].date,last=data.daily[data.daily.length-1].date;
+  if(start<first||end>last)throw Error('Choose dates within the loaded record: '+first+' to '+last+'.');
   const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance','leVariable'])out[k]=data[k];
   if(data.weather){
     cadence=cadence||data.weather.cadence||'monthly';

@@ -12,6 +12,12 @@ assert.equal(data.weather.daily.length,366);assert.equal(data.weather.daily[0].T
 assert(Math.abs(data.weather.daily[0].precip-4.8)<1e-10);
 assert.equal(data.weather.daily[0].Rndaily,50);
 const restored=core.restoreSummary(JSON.stringify(data));assert.equal(restored.weather.daily.length,366);
+// Date validation must precede weather enumeration and prevent partial-year explosions.
+const poison={get daily(){throw Error('Weather allocation must not start');}};
+for(const dates of [['0002-01-01','2024-12-31'],['2024-02-30','2024-03-01'],['2024-01-01','2023-01-01'],['','2024-01-01']]){
+ assert.throws(()=>weather.periods(poison,'daily',...dates,30),e=>!e.message.includes('allocation must not start'));
+}
+assert.throws(()=>core.transferSummary(data,'2023-01-01','2024-12-31','daily'),/within the loaded record/);
 const transfers={};
 for(const cadence of ['daily','weekly','monthly']){
  const transfer=core.transferSummary(restored,'2024-01-01','2024-12-31',cadence);transfers[cadence]=transfer;

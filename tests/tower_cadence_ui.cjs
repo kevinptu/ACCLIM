@@ -11,6 +11,14 @@ for(let i=0;i<48;i++){const t=start+i*1800000;lines.push([stamp(t),stamp(t+18000
 const data=core.parse(lines.join('\n'),'FLX_US-Test_FULLSET_HH_2024.csv');
 c.receive({data:{request:0,type:'result',data}});
 assert.equal(nodes.weatherCadence.value,'daily');assert.equal(JSON.parse(nodes.result.value).weather.periods.length,1);
+const transferOriginal=core.transferSummary;let transferCalls=0;
+core.transferSummary=(...args)=>{transferCalls++;return transferOriginal(...args);};
+nodes.transferStart.value='0002-01-01';nodes.transferStart.oninput();nodes.transferStart.onchange();
+assert.equal(transferCalls,0);assert.equal(nodes.result.value,'');assert.equal(nodes.copy.disabled,true);assert.equal(nodes.selectCopy.disabled,true);
+nodes.applyDates.onclick();assert.equal(transferCalls,1);assert(nodes.transferNote.textContent.includes('40,000'));
+nodes.transferStart.value='2023-01-01';nodes.applyDates.onclick();assert(nodes.transferNote.textContent.includes('within the loaded record'));
+nodes.transferStart.value='2024-01-01';nodes.applyDates.onclick();assert.equal(nodes.copy.disabled,false);assert.equal(nodes.selectCopy.disabled,false);
+core.transferSummary=transferOriginal;
 nodes.weatherCadence.value='weekly';nodes.weatherCadence.onchange();assert.equal(JSON.parse(nodes.result.value).weather.cadence,'weekly');
 nodes.download.onclick();assert(saved);
 (async()=>{

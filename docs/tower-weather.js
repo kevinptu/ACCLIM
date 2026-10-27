@@ -42,8 +42,17 @@ function create(header,selected,sw,num,quanterra){
  }
  return {add,finish,checkUnits,source};
 }
+// Validate before allocating any date-indexed arrays, including during year editing.
+function validateRange(start,end){
+ const parse=value=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(value))throw Error('Enter complete dates (YYYY-MM-DD).');const t=Date.parse(value+'T00:00:00Z');if(!Number.isFinite(t)||new Date(t).toISOString().slice(0,10)!==value)throw Error('Enter valid calendar dates.');return t;};
+ const a=parse(start),b=parse(end);
+ if(b<a)throw Error('Start date must be on or before end date.');
+ if((b-a)/86400000+1>40000)throw Error('The selected range exceeds 40,000 days. Check the year fields.');
+ return {start:a,end:b};
+}
 // Weekly blocks start January 1; the last block ends at the year boundary.
 function periods(weather,cadence,start,end,intervalMinutes){
+ validateRange(start,end);
  if(!['daily','weekly','monthly'].includes(cadence))throw Error('Choose daily, weekly or monthly tower weather.');
  if(cadence==='monthly')return weather.months.filter(m=>m.month>=start.slice(0,7)&&m.month<=end.slice(0,7)).map(m=>{
   const date=m.month+'-01',a=Date.parse(date+'T00:00:00Z'),d=new Date(a),b=Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1);
@@ -66,5 +75,5 @@ function periods(weather,cadence,start,end,intervalMinutes){
  }
  return out;
 }
-const api={options,create,periods};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TowerWeather=api;
+const api={options,create,periods,validateRange};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TowerWeather=api;
 })(typeof self!=='undefined'?self:globalThis);
