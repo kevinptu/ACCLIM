@@ -102,7 +102,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
-  faparMethod: 'EVI2',     // NDVI squared or scaled EVI2
+  faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
   fitEVI2: false,         // Fit EVI2 bounds against FIPAR; otherwise use fixed bounds
@@ -897,6 +897,7 @@ function computeDiagnostics(running, instant, params) {
       ratio.multiply(p.C4frac_a).add(p.C4frac_b).exp()
     )
   );
+  C4frac = ee.Number(0); // C3-only test; comment out to restore modeled C4 fraction
 
   // Maximum daytime GPP, with the same C3/C4 mixture as mean daytime GPP.
   var GPPmax = ee.Number(1).subtract(C4frac).multiply(GPPmax_C3)
@@ -2444,7 +2445,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'EVI2_FIXED',
+  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'FIPAR',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
