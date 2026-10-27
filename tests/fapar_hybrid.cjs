@@ -8,6 +8,6 @@ for(const path of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  const original={min:new N(min),max:new N(.9),valid,a:1,b:2,count:12};
  const result=ctx.fixedUpperEVI2Fit(original);assert.equal(result.min.v,min);assert.equal(result.max.v,.6);assert.equal(result.valid.v,expected);assert.equal(original.max.v,.9);
  }
- assert(s.includes("value: 'EVI2_FITTED_MIN'"));assert(s.includes("fitEVI2: UI.faparSelector.getValue() !== 'EVI2_FIXED'"));
+ assert(s.includes("value: 'EVI2_FITTED_MIN'"));assert(s.includes("fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'"));
 }
 console.log('PASS fitted lower endpoint, fixed upper endpoint, invalid ranges, preserved fit, UI wiring, both script syntaxes');

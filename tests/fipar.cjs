@@ -15,7 +15,7 @@ for (const path of paths) {
  for(const ndvi of [-.2,.15,.5,.97,1]) assert(Math.abs(ctx.computeFIPAR(ndvi,ctx.p).v-(Math.max(0,ndvi-.15)/.82)**1.25)<1e-12);
  assert(!s.includes('greencover'));
  assert(!s.includes('fipar_ndvi_'));
- assert.strictEqual((s.match(/computeFIPAR\(/g)||[]).length,3); // Shared definition, forcing calculation, and calibration target.
+ assert.strictEqual((s.match(/function computeFIPAR\(/g)||[]).length,1); // One definition shared by both forcing adapters and the fit.
  assert(s.includes("FIPAR: f.getNumber('FIPAR')"));
  assert(s.includes("var FIPAR = ee.Number(instant.get('FIPAR'));"));
  assert(s.includes('var em_sur = FIPAR.multiply(p.em_v)'));
@@ -37,7 +37,7 @@ for (const path of paths) {
    assert.equal(ctx.photosyntheticFAPAR(input,{faparMethod:'FIPAR'}).v,fraction);
  }
  assert(s.includes("p.fitEVI2 && !p.faparFit"));
- assert(s.includes("overrides.faparMethod==='EVI2' && overrides.fitEVI2"));
+ assert(s.includes("p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit"));
  const block=s.slice(s.indexOf('  var PredLEcday_mean ='),s.indexOf('  return ee.Dictionary',s.indexOf('  var PredLEcday_mean =')));
  function water(fapar,fipar){Object.assign(ctx,{FAPAR:new N(fapar),FIPAR:new N(fipar),PT_mean:new N(100),fcold_mean:new N(.8),fwet_mean:new N(.1),fSM_mean:new N(.5)});vm.runInContext(block,ctx);return ['PredLEcday_mean','PredLEiday_mean','PredLEsday_mean','PredLEday_mean'].map(k=>ctx[k].v);}
  assert.deepStrictEqual(water(.2,.6),water(.9,.6));

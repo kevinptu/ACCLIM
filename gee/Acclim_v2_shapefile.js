@@ -1,101 +1,18 @@
 /**
- * ============================================================================
- * LANDFLUX / ACCLIM v1.0 — Google Earth Engine port
- * ============================================================================
- *
- * Faithful GEE translation of gpp_acclimate_v3a_GRD_K2.Rmd
- * (Assimilation Capacity Coordinates with Light Interception Model, K. Tu).
- *
- * Architecture goals (intentionally over-modular for a v1 — see SECTION ORDER):
- *   - Pure model functions, separated from data I/O.
- *   - A single "forcing FeatureCollection" schema that any data source must
- *     conform to. Adding a new data source = writing one adapter that returns
- *     that schema.
- *   - Parameters live in a single dictionary that can be overridden by callers
- *     (the entry point for MCMC calibration and Monte Carlo uncertainty).
- *   - Uncertainty / calibration / ML hooks are stubbed with documented
- *     signatures so future modules plug in without rewiring the core.
- *
- * SECTION ORDER
- *   0. CONFIG       - constants, dataset IDs, defaults
- *   1. UTILS        - vapor pressure, daylength, smoothing, pressure helpers
- *   2. CO2          - MVP: constant 400 ppm (replace with lookup later)
- *   3. ADAPTERS     - one function per gridded data source
- *   4. ASSEMBLY     - merge adapters into the canonical forcing FC
- *   5. MODEL        - ACCLIM core, sequential running means via ee.List.iterate
- *   6. RUNNER       - top-level runAtPoint + uncertainty/ML stubs
- *   7. UI           - panel, inputs, results, charts
- *   8. EXPORTS      - to Drive
- *   9. ENTRY POINT  - assemble UI, attach to root
- *
- * RAW INPUTS (same data sources as PT-JPL — alignment was an explicit goal)
- *   TerraClimate (IDAHO_EPSCOR/TERRACLIMATE, monthly):
- *     srad (W/m2, scale 0.1), tmmn (degC, scale 0.1), tmmx (degC, scale 0.1),
- *     vap (kPa, scale 0.001) = actual vapor pressure ea; pr (mm/month, scale 1)
- *   MODIS (MODIS/061/MOD13Q1, 16-day, 250m):
- *     sur_refl_b01 (red), sur_refl_b02 (NIR), NDVI
- *
- * MVP DESIGN DECISIONS (each labeled so they're easy to find and revisit):
- *   [MVP-CO2]      ca_daily = 400 ppm (constant). Per user; replace with
- *                  NOAA/OCO-2 lookup when needed.
- *   [MVP-MONTHLY]  ACCLIM iterates at TerraClimate's native monthly cadence.
- *                  Daily carbon products interpolate monthly results afterward.
- *                  MODIS 16-day observations within each
- *                  month are mean-aggregated to one monthly value. With tc=7
- *                  days and dt≈30 days, w = exp(-30/7) ≈ 0.013, so each
- *                  running mean ≈ current month's value (the seed only
- *                  matters for month 1). The model is cadence-agnostic —
- *                  each forcing feature carries its own `dt` (days since
- *                  previous), so swapping to a finer-cadence source later
- *                  requires no model changes, only a new adapter.
- *   [MVP-PRESSURE] Pdaily = 101.325 kPa (sea-level standard, 1013.25 mbar)
- *                  for all sites. Per user; replace with elevation-derived
- *                  barometric formula or a gridded pressure product later.
- *   [MVP-Rn]       Rndaily derived internally using the PT-JPL formula
- *                  (isothermal net radiation), since neither TerraClimate
- *                  nor MODIS provide Rn directly and the user requested
- *                  "same inputs as PT-JPL".
- *   [MVP-SMOOTH]   At monthly cadence, MODIS observations are mean-aggregated
- *                  within each month — smoothing is implicit in the average.
- *                  The gap-filler smoother (smoothMovingAverage in Section 1,
- *                  port of vegetation_gap_filler.html) is kept available for
- *                  finer-cadence pipelines we'll add later.
- *
- * CANONICAL FORCING SCHEMA  (one feature per monthly timestep in v1; every
- *                             adapter must contribute toward this and the
- *                             assembled FC must have no nulls)
- *   date         string  'YYYY-MM-DD' (typically month-start)
- *   millis       number  date in millis since epoch (sort key)
- *   doy          number  day of year of the month's anchor date (1-366)
- *   dt           number  days since previous timestep (model reads this)
- *   Tmin         number  monthly mean of daily minimum air temperature, deg C
- *   Tmax         number  monthly mean of daily maximum air temperature, deg C
- *   Tdaily       number  monthly mean air temperature, deg C       [(Tmin+Tmax)/2]
- *   SWRdaily     number  monthly mean shortwave radiation, W/m2
- *   ea           number  monthly mean actual water vapor pressure, kPa
- *   VPDdaily     number  vapor pressure deficit, kPa               [es(Tdaily) - ea]
- *   ca_daily     number  atmospheric CO2 concentration, umol/mol (ppm) [MVP: 400]
- *   Pdaily       number  air pressure, kPa                              [MVP: 101.325]
- *   Rndaily      number  monthly mean net radiation, W/m2          [PT-JPL formula]
- *   EVI2         number  monthly mean enhanced vegetation index 2
- *   NDVI         number  monthly mean normalized difference vegetation index
- *   red          number  monthly mean red surface reflectance (0-1)
- *   nir          number  monthly mean NIR surface reflectance (0-1)
- *   daylength    number  astronomical daylength at the month's anchor doy, hours
- *
- *   Note on R-script deviations:
- *   - The R script uses FLUXNET's Tnight as input and derives Tmin = 2*Tnight
- *     - Tdaily. With gridded data we use Tmin/Tmax directly from TerraClimate
- *     and compute Tday consistently — only Tmin/Tmax/Tday enter the model
- *     after that point.
- *   - The R script's loop runs daily over FLUXNET data. We iterate monthly
- *     because the climate forcing is monthly. The model code is unchanged;
- *     the running-mean weight w = exp(-dt/tc) now uses dt ≈ 30 days instead
- *     of 1, so x_mean[i] ≈ current month's value (correct behavior per the
- *     EWMA, given that tc < dt).
- * ============================================================================
+ * ACCLIM research web app — selectable weather and satellite reflectance.
+ * TerraClimate: monthly physiology. ERA5-Land / GRIDMET: daily physiology.
+ * Native output is retained; daily fluxes are aggregated for monthly comparisons.
+ * Tower-weather input currently uses the importer's monthly summaries.
+ * Satellite red/NIR: quality screening, actual dates where available, otherwise
+ * composite midpoints; paired linear interpolation with bounded gaps.
+ * Bucket-only interpolation preserves storage; missing carbon stays unavailable.
+ * All weather sources supply actual vapor pressure to RH/VPD calculations.
+ * ERA5-Land supplies pressure; other gridded sources retain constant pressure.
+ * CO2 remains the configured constant. Thermal diagnostics are unchanged.
+ * See docs/data-sources.md for units, source bands, coverage flags and exports.
+ * Legacy monthly adapter helpers are retained for research comparisons;
+ * the app uses assembleSelectedForcing through runForGeometryAsync.
  */
-
 
 // ============================================================================
 // SECTION 0 — CONFIG
@@ -544,6 +461,269 @@ function griddedDaytimeRn(swrDaily, daylength, tday, ea, albedo, emSurface, p) {
     .add(kelvin.pow(4).multiply(p.sb).multiply(emAirDay.subtract(emSurface)));
 }
 
+// Dataset adapters. Weather is sampled at its native grid; reflectance at 30/250 m.
+// These settings are research choices, not claims about observed revisit intervals.
+var WEATHER_SOURCES = {
+  TERRACLIMATE: {label:'TerraClimate (global / ~4.6 km / monthly)', id:'IDAHO_EPSCOR/TERRACLIMATE', daily:false, scale:4638},
+  ERA5: {label:'ERA5-Land (global / ~11 km / daily)', id:'ECMWF/ERA5_LAND/DAILY_AGGR', daily:true, scale:11132},
+  GRIDMET: {label:'GRIDMET (contiguous US / ~4 km / daily)', id:'IDAHO_EPSCOR/GRIDMET', daily:true, scale:4638}
+};
+var SATELLITE_SOURCES = {
+  LANDSAT8: {label:'Landsat (global / 30 m / 8-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_8DAY'], days:8, scale:30, gap:32, kind:'landsat'},
+  LANDSAT32: {label:'Landsat (global / 30 m / 32-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_32DAY'], days:32, scale:30, gap:64, kind:'landsat'},
+  HLS: {label:'HLS Landsat + Sentinel (global / 30 m / combined observations)', ids:['NASA/HLS/HLSL30/v002','NASA/HLS/HLSS30/v002'], days:1, scale:30, gap:32, kind:'hls'},
+  MODIS1: {label:'MODIS Terra + Aqua (global / 250 m / daily)', ids:['MODIS/061/MOD09GQ','MODIS/061/MYD09GQ'], days:1, scale:250, gap:32, kind:'gq'},
+  MODIS8: {label:'MODIS Terra + Aqua (global / 250 m / 8-day)', ids:['MODIS/061/MOD09Q1','MODIS/061/MYD09Q1'], days:8, scale:250, gap:32, kind:'q1'},
+  MODIS16: {label:'MODIS Terra + Aqua (global / 250 m / 16-day)', ids:['MODIS/061/MOD13Q1','MODIS/061/MYD13Q1'], days:16, scale:250, gap:48, kind:'vi'}
+};
+function sourceCalendar(start, end, daily) {
+  start = ee.Date(start); end = ee.Date(end);
+  if (!daily) start = ee.Date(start.format('YYYY-MM-01'));
+  var unit = daily ? 'day' : 'month';
+  return ee.FeatureCollection(ee.List.sequence(0, end.difference(start, unit).floor()).map(function(i) {
+    var d = start.advance(i, unit), next = d.advance(1, unit);
+    return ee.Feature(null, {date:d.format('YYYY-MM-dd'), millis:d.millis(), year:d.get('year'), month:d.get('month'),
+      period_days:next.difference(d,'day'), model_cadence:daily?'daily':'monthly'});
+  }));
+}
+function sampleWeather(geom, start, end, key) {
+  var spec = WEATHER_SOURCES[key];
+  if (!spec) throw new Error('Unknown weather source: '+key);
+  var names = key==='TERRACLIMATE' ? ['tmmn','tmmx','srad','vap','pr'] : key==='GRIDMET' ?
+    ['tmmn','tmmx','srad','rmax','pr'] : ['temperature_2m_min','temperature_2m_max','temperature_2m',
+      'dewpoint_temperature_2m','surface_solar_radiation_downwards_sum','total_precipitation_sum','surface_pressure'];
+  var images = ee.ImageCollection(spec.id).filterBounds(geom).filterDate(start,ee.Date(end).advance(1,'day'));
+  // Retain nulls in the calendar. Never turn masked pixels into valid zero weather.
+  return sourceCalendar(start,end,spec.daily).map(function(row) {
+    var date=ee.Date(row.get('millis'));
+    var matches=images.filterDate(date,date.advance(1,'day'));
+    var blank=ee.Image.constant(ee.List.repeat(0,names.length)).rename(names).updateMask(ee.Image.constant(0));
+    var img=ee.Image(ee.Algorithms.If(matches.size(),matches.first(),blank));
+    var s=ee.Feature(null,img.select(names).reduceRegion({reducer:ee.Reducer.mean(),geometry:geom,
+      scale:spec.scale,maxPixels:1e10,tileScale:4}));
+    function number(name, factor, offset) {
+      return ee.Algorithms.If(ee.Algorithms.IsEqual(s.get(name),null),null,
+        ee.Number(s.get(name)).multiply(factor===undefined?1:factor).add(offset||0));
+    }
+    var lo=key==='ERA5'?'temperature_2m_min':'tmmn', hi=key==='ERA5'?'temperature_2m_max':'tmmx';
+    var tmin=number(lo,key==='TERRACLIMATE'?0.1:1,key==='TERRACLIMATE'?0:-273.15);
+    var tmax=number(hi,key==='TERRACLIMATE'?0.1:1,key==='TERRACLIMATE'?0:-273.15);
+    var ea=key==='TERRACLIMATE'?number('vap',0.001): key==='GRIDMET'?
+      ee.Algorithms.If(s.toDictionary(['tmmn','rmax']).size().eq(2),magnusVP(ee.Number(tmin)).multiply(ee.Number(s.get('rmax'))).divide(100),null):
+      ee.Algorithms.If(ee.Algorithms.IsEqual(s.get('dewpoint_temperature_2m'),null),null,magnusVP(ee.Number(s.get('dewpoint_temperature_2m')).subtract(273.15)));
+    var tmean=key==='ERA5'?number('temperature_2m',1,-273.15):
+      ee.Algorithms.If(s.toDictionary([lo,hi]).size().eq(2),ee.Number(tmin).add(ee.Number(tmax)).divide(2),null);
+    var rain=key==='ERA5'?number('total_precipitation_sum',1000):number('pr');
+    rain=ee.Algorithms.If(ee.Algorithms.IsEqual(rain,null),null,ee.Algorithms.If(ee.Number(rain).gte(0),rain,null));
+    return row.setGeometry(geom).set({Tmin:tmin,Tmax:tmax,Tdaily:tmean,ea:ea,
+      SWRdaily:key==='ERA5'?number('surface_solar_radiation_downwards_sum',1/86400):number('srad',key==='TERRACLIMATE'?0.1:1),
+      precip:rain,
+      Pdaily:key==='ERA5'?number('surface_pressure',0.001):MVP_CONSTANTS.Pdaily,
+      weather_source:key,weather_dataset:spec.id,weather_scale_m:spec.scale,
+      weather_gapfill_provenance:'supplied product values retained; original observation gaps not supplied by catalog',
+      weather_source_missing_pct:null});
+  });
+}
+function clearModisState(state) {
+  // Cloud-state 3 (not set/assumed clear) is explicitly excluded.
+  return state.bitwiseAnd(3).eq(0).and(state.bitwiseAnd(4).eq(0))
+    .and(state.bitwiseAnd(3<<8).eq(0)).and(state.bitwiseAnd((1<<10)|(1<<12)|(1<<13)|(1<<15)).eq(0));
+}
+function satelliteImages(geom,start,end,key) {
+  var spec=SATELLITE_SOURCES[key], merged=ee.ImageCollection([]);
+  if (!spec) throw new Error('Unknown satellite source: '+key);
+  spec.ids.forEach(function(id) {
+    var images=ee.ImageCollection(id).filterBounds(geom).filterDate(start,end);
+    if(spec.kind==='gq') {
+      var qa=ee.ImageCollection(id.replace('09GQ','09GA')).filterDate(start,end);
+      images=ee.ImageCollection(ee.Join.saveFirst('cloudQA').apply(images,qa,
+        ee.Filter.equals({leftField:'system:time_start',rightField:'system:time_start'})))
+        .filter(ee.Filter.notNull(['cloudQA']));
+    }
+    images=images.map(function(img) {
+      img=img.clip(geom.buffer(spec.scale*2));
+      var d=ee.Date(ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'));
+      var dateDay=ee.Image.constant(d.millis().divide(86400000));
+      var sampleDay=d;
+      var red,nir,mask=ee.Image.constant(1);
+      if(spec.kind==='landsat') {
+        red=img.select('red');nir=img.select('nir');
+        dateDay=dateDay.add(spec.days/2); // Catalog composites have no selected-pixel date band.
+        sampleDay=d.advance(spec.days/2,'day');
+      } else if(spec.kind==='hls') {
+        red=img.select('B4');nir=img.select(id.indexOf('HLSS30')>=0?'B8A':'B5');
+        var fm=img.select('Fmask');mask=fm.bitwiseAnd(30).eq(0).and(fm.rightShift(6).bitwiseAnd(3).lt(3));
+      } else {
+        red=img.select('sur_refl_b01').multiply(0.0001);nir=img.select('sur_refl_b02').multiply(0.0001);
+        if(spec.kind==='vi') {
+          var qa=img.select('DetailedQA');
+          mask=img.select('SummaryQA').eq(0).and(qa.bitwiseAnd((1<<8)|(1<<10)|(1<<14)|(1<<15)).eq(0));
+          var jan=ee.Date.fromYMD(d.get('year'),1,1);
+          dateDay=img.select('DayOfYear').subtract(1).add(jan.millis().divide(86400000));
+        } else {
+          var qc=img.select(spec.kind==='gq'?'QC_250m':'QA');
+          mask=qc.bitwiseAnd(3).eq(0).and(qc.rightShift(4).bitwiseAnd(255).eq(0));
+          var state=spec.kind==='gq'?ee.Image(img.get('cloudQA')).select('state_1km'):img.select('State');
+          mask=mask.and(clearModisState(state));
+          if(spec.kind==='q1') {
+            // MODIS final composite stops at year end, unlike overlapping Landsat composites.
+            var nextYear=ee.Date.fromYMD(d.get('year').add(1),1,1);
+            dateDay=dateDay.add(nextYear.difference(d,'day').min(8).divide(2).floor());
+            sampleDay=d.advance(nextYear.difference(d,'day').min(8).divide(2).floor(),'day');
+          }
+        }
+      }
+      mask=mask.and(red.gte(0)).and(nir.gte(0)).and(red.lte(1)).and(nir.lte(1)).and(red.add(nir).gt(0));
+      return red.rename('red').addBands(nir.rename('nir')).addBands(dateDay.rename('observation_day'))
+        .updateMask(mask).set({'system:time_start':img.get('system:time_start'),sample_millis:sampleDay.millis()});
+    });
+    merged=merged.merge(images);
+  });
+  return merged;
+}
+function sampleSatellite(geom,start,end,key,unpadded) {
+  var spec=SATELLITE_SOURCES[key], pad=spec.gap+32;
+  var a=ee.Date(start).advance(unpadded?0:-pad,'day'), b=ee.Date(end).advance(unpadded?0:pad,'day');
+  var images=satelliteImages(geom,a,b.advance(1,'day'),key);
+  // Group pixels by their actual observation day BEFORE reducing spatially.
+  // Same-day Terra/Aqua or HLS values are averaged with a common red/NIR mask.
+  // Sample existing images only, rather than rebuilding every composite on every calendar day.
+  var sampled=ee.FeatureCollection(images.toList(images.size()).map(function(item) {
+    var img=ee.Image(item),startDay=ee.Date(img.get('sample_millis'));
+    var count=spec.kind==='vi'?ee.Date.fromYMD(startDay.get('year').add(1),1,1).difference(startDay,'day').min(16):ee.Number(1);
+    return ee.List.sequence(0,count.subtract(1)).map(function(i) {
+      var d=startDay.advance(i,'day');
+      var pair=img.select(['red','nir']).updateMask(img.select('observation_day').eq(d.millis().divide(86400000)));
+      var values=pair.reduceRegion({reducer:ee.Reducer.mean(),geometry:geom,scale:spec.scale,maxPixels:1e10,tileScale:4});
+      return ee.Feature(null,values).set({date:d.format('YYYY-MM-dd'),millis:d.millis()});
+    });
+  }).flatten()).filter(ee.Filter.notNull(['red','nir']));
+  var observed=sampled.distinct(['millis']).map(function(f) {
+    var same=sampled.filter(ee.Filter.eq('millis',f.get('millis')));
+    return f.set({red:same.aggregate_mean('red'),nir:same.aggregate_mean('nir'),satellite_observation_count:same.size()});
+  });
+  return observed;
+}
+function alignedSatellite(geom,start,end,key,observations) {
+  var spec=SATELLITE_SOURCES[key],observed=observations||sampleSatellite(geom,start,end,key);
+  var safe=ee.Feature(null,{millis:0,red:0,nir:0});
+  return sourceCalendar(start,end,true).map(function(f) {
+    var t=f.getNumber('millis');
+    var left=observed.filter(ee.Filter.lte('millis',t)).sort('millis',false);
+    var right=observed.filter(ee.Filter.gte('millis',t)).sort('millis');
+    var l=ee.Feature(ee.Algorithms.If(left.size(),left.first(),safe));
+    var r=ee.Feature(ee.Algorithms.If(right.size(),right.first(),safe));
+    var span=r.getNumber('millis').subtract(l.getNumber('millis')).divide(86400000);
+    var valid=left.size().gt(0).and(right.size().gt(0)).and(span.lte(spec.gap));
+    var w=t.subtract(l.getNumber('millis')).divide(r.getNumber('millis').subtract(l.getNumber('millis')).max(1));
+    var red=l.getNumber('red').add(r.getNumber('red').subtract(l.getNumber('red')).multiply(w));
+    var nir=l.getNumber('nir').add(r.getNumber('nir').subtract(l.getNumber('nir')).multiply(w));
+    var same=l.getNumber('millis').eq(t).and(valid);
+    return f.set({red:ee.Algorithms.If(valid,red,null),nir:ee.Algorithms.If(valid,nir,null),
+      NDVI:ee.Algorithms.If(valid,nir.subtract(red).divide(nir.add(red).max(1e-12)),null),
+      EVI2:ee.Algorithms.If(valid,nir.subtract(red).multiply(2.5).divide(nir.add(red.multiply(2.4)).add(1)).max(0).min(1),null),
+      satellite_status:ee.Algorithms.If(valid,ee.Algorithms.If(same,'observed','interpolated'),'unavailable'),
+      satellite_missing_pct:ee.Algorithms.If(same,0,100),satellite_unavailable_pct:ee.Algorithms.If(valid,0,100),
+      satellite_gap_days:ee.Algorithms.If(valid,span,null),
+      satellite_left_date:ee.Algorithms.If(valid,ee.Date(l.get('millis')).format('YYYY-MM-dd'),null),
+      satellite_right_date:ee.Algorithms.If(valid,ee.Date(r.get('millis')).format('YYYY-MM-dd'),null),
+      satellite_date_basis:spec.kind==='vi'?'pixel observation date':spec.days===1?'observation date':'composite midpoint',
+      satellite_source:key,satellite_scale_m:spec.scale,satellite_max_gap_days:spec.gap});
+  });
+}
+function assembleSelectedForcing(geom,start,end,config) {
+  config=config||{};
+  var key=config.weatherSource||'TERRACLIMATE', sat=config.satelliteSource||'MODIS16';
+  var daily=!config.weatherPlan && WEATHER_SOURCES[key].daily;
+  var cal=sourceCalendar(start,end,daily);
+  var first=ee.Date(cal.aggregate_min('millis'));
+  var last=ee.Feature(cal.sort('millis',false).first());
+  var lastDate=ee.Date(last.get('millis')).advance(last.getNumber('period_days').subtract(1),'day');
+  var weather;
+  if(config.weatherPlan) {
+    weather=ee.FeatureCollection(Object.keys(config.weatherPlan.byMonth).map(function(k) {
+      var entry=config.weatherPlan.byMonth[k],r=entry.data;
+      var counts=['ta','sw','ea','pa','rain','rn'];
+      var available=counts.reduce(function(sum,k){return sum+(r.counts&&carbonFinite(r.counts[k])?r.counts[k]:0);},0);
+      return towerWeatherFeature(r,geom).set({tower_weather_valid:entry.valid?1:0,
+        weather_source_missing_pct:r.expected?100*(1-available/(counts.length*r.expected)):100,
+        weather_gapfill_provenance:'supplied tower gap-filled fields retained; coverage refers to supplied records'});
+    }));
+  } else weather=config.sampledWeather||sampleWeather(geom,first,lastDate,key);
+  var satellite=config.alignedSatellite||alignedSatellite(geom,first,lastDate,sat,config.sampledSatellite), p=ACCLIM_PARAMS;
+  var lat=ee.Number(geom.centroid({maxError:1}).coordinates().get(1));
+  var raw=cal.map(function(f) {
+    var t=f.getNumber('millis'), days=f.getNumber('period_days');
+    var matches=weather.filter(ee.Filter.eq('millis',t));
+    var wf=ee.Feature(ee.Algorithms.If(matches.size(),matches.first(),ee.Feature(null,{})));
+    var vi=satellite.filter(ee.Filter.gte('millis',t)).filter(ee.Filter.lt('millis',t.add(days.multiply(86400000))));
+    var valid=vi.filter(ee.Filter.notNull(['red','nir']));
+    var props=ee.Dictionary({});
+    ['red','nir','NDVI','EVI2','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){props=props.set(k,vi.aggregate_mean(k));});
+    var dl=astronomicalDaylength(lat,doyFromDate(ee.Date(t).advance(daily?0:days.divide(2),'day')));
+    var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(valid.size().eq(days)).and(dl.gt(0));
+    if(config.weatherPlan)complete=complete.and(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('tower_weather_valid'),null),0,wf.get('tower_weather_valid'))).eq(1));
+    return f.setGeometry(geom).set(wf.toDictionary()).set(props).set({
+      daylength:dl,doy:doyFromDate(ee.Date(t)),dt:days,ca_daily:co2ForDate(ee.Date(t)),
+      model_cadence:daily?'daily':'monthly',weather_source:config.weatherPlan?'tower':key,
+      model_valid:complete,weather_missing_pct:ee.Number(7).subtract(wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip']).size()).multiply(100/7),
+      precipitation_missing_pct:ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('precip'),null),100,0),
+      satellite_source:sat,satellite_scale_m:SATELLITE_SOURCES[sat].scale,
+      satellite_date_basis:ee.Feature(vi.first()).get('satellite_date_basis'),
+      satellite_status:ee.Algorithms.If(valid.size().eq(days),ee.Algorithms.If(vi.aggregate_sum('satellite_missing_pct'),'interpolated','observed'),'unavailable'),
+      satellite_gap_days:vi.aggregate_max('satellite_gap_days'),satellite_left_date:ee.Feature(vi.sort('millis').first()).get('satellite_left_date'),
+      satellite_right_date:ee.Feature(vi.sort('millis',false).first()).get('satellite_right_date'),satellite_max_gap_days:SATELLITE_SOURCES[sat].gap});
+  });
+  var ready=raw.filter(ee.Filter.eq('model_valid',1)).map(function(f) {
+    var tday=f.getNumber('Tmax').multiply(0.75).add(f.getNumber('Tmin').multiply(0.25));
+    var ea=f.getNumber('ea'), albedo=f.getNumber('red').add(f.getNumber('nir')).divide(2).max(0).min(1);
+    var fipar=computeFIPAR(f.getNumber('NDVI'),p);
+    var em=fipar.multiply(p.em_v).add(ee.Number(1).subtract(fipar).multiply(p.em_nv));
+    var kelvin=f.getNumber('Tdaily').add(273.15);
+    var rn=ee.Number(1).subtract(albedo).multiply(f.getNumber('SWRdaily')).add(kelvin.pow(4).multiply(p.sb)
+      .multiply(ea.multiply(10).divide(kelvin).pow(1/7).multiply(1.31).subtract(em)));
+    if(config.weatherPlan)rn=f.getNumber('Rndaily');
+    return f.set({Tday:tday,albedo:albedo,FIPAR:fipar,Rndaily:rn,
+      Rnday:config.weatherPlan?rn.multiply(24).divide(f.getNumber('daylength')):
+        griddedDaytimeRn(f.getNumber('SWRdaily'),f.getNumber('daylength'),tday,ea,albedo,em,p),
+      esTday:magnusVP(tday),VPDdaily:magnusVP(tday).subtract(ea).max(0)});
+  });
+  return ready.merge(raw.filter(ee.Filter.eq('model_valid',0))).sort('millis');
+}
+
+// Fill only bucket inputs. Carbon and meteorological model outputs stay missing.
+function bridgeBucketForcing(baseline) {
+  var prepared=baseline.map(function(f) {
+    var valid=f.toDictionary(['PT_mean','FIPAR','fwet_mean','daylength']).size().eq(4);
+    var demand=ee.Number(f.get('PT_mean')).multiply(ee.Number(1).subtract(ee.Number(f.get('FIPAR'))));
+    return f.set({_bucket_rain:ee.Algorithms.If(ee.Algorithms.IsEqual(f.get('precip'),null),null,f.getNumber('precip').divide(f.getNumber('period_days'))),
+      _bucket_demand:ee.Algorithms.If(valid,demand.max(0).multiply(ee.Number(1).subtract(f.getNumber('fwet_mean'))).multiply(f.getNumber('daylength')).multiply(3600/2450000),null),
+      _bucket_surface:ee.Algorithms.If(valid,demand.multiply(f.getNumber('fwet_mean')),null)});
+  });
+  var fields=['_bucket_rain','_bucket_demand','_bucket_surface','PT_mean','FIPAR','fwet_mean','fSM_mean',
+    'PredLEsday_mean','PredLEday_mean','PredLEcday_mean','PredLEiday_mean'];
+  return prepared.map(function(f) {
+    var missing=f.toDictionary(fields).size().lt(fields.length).or(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(f.get('bucket_forcing_missing_pct'),null),0,f.get('bucket_forcing_missing_pct'))).gt(0)), filled=f;
+    fields.forEach(function(k) {
+      var valid=prepared.filter(ee.Filter.notNull([k]));
+      var left=valid.filter(ee.Filter.lte('millis',f.get('millis'))).sort('millis',false);
+      var right=valid.filter(ee.Filter.gte('millis',f.get('millis'))).sort('millis');
+      var safe=ee.Feature(null,{millis:0}).set(k,0);
+      var l=ee.Feature(ee.Algorithms.If(left.size(),left.first(),safe)),r=ee.Feature(ee.Algorithms.If(right.size(),right.first(),safe));
+      var w=f.getNumber('millis').subtract(l.getNumber('millis')).divide(r.getNumber('millis').subtract(l.getNumber('millis')).max(1));
+      var value=l.getNumber(k).add(r.getNumber(k).subtract(l.getNumber(k)).multiply(w));
+      filled=filled.set(k,ee.Algorithms.If(ee.Algorithms.IsEqual(f.get(k),null),
+        ee.Algorithms.If(left.size().gt(0).and(right.size().gt(0)),value,null),f.get(k)));
+    });
+    return filled.set({precip:ee.Algorithms.If(ee.Algorithms.IsEqual(filled.get('_bucket_rain'),null),null,
+      filled.getNumber('_bucket_rain').multiply(f.getNumber('period_days'))),
+      bucket_forcing_missing_pct:ee.Algorithms.If(missing,100,0),
+      bucket_forcing_status:ee.Algorithms.If(missing,
+        ee.Algorithms.If(filled.toDictionary(fields).size().eq(fields.length),'interpolated','unavailable'),'supplied'),
+      bucket_fit_observed:ee.Algorithms.If(missing,0,1)});
+  });
+}
+
 function assembleForcing(geom, startDate, endDate, config) {
   config = config || {};
   var scale = config.scale || DEFAULTS.sampleScale;
@@ -706,10 +886,9 @@ function computeInitialState(forcingList, params) {
     var esTmin = magnusVP(Tmin);
     var esTmax = magnusVP(Tmax);
     var esTday = magnusVP(Tday);
-    var useTowerHumidity = ee.Algorithms.IsEqual(f.get('weather_source'), 'tower');
-    var humidityPressure = ee.Number(ee.Algorithms.If(useTowerHumidity, f.get('ea'), esTmin));
-    var VPDmax = ee.Number(ee.Algorithms.If(useTowerHumidity, esTmax.subtract(humidityPressure).max(0), esTmax.subtract(esTmin)));
-    var VPDday = ee.Number(ee.Algorithms.If(useTowerHumidity, esTday.subtract(humidityPressure).max(0), esTday.subtract(esTmin)));
+    var humidityPressure = f.getNumber('ea');
+    var VPDmax = esTmax.subtract(humidityPressure).max(0);
+    var VPDday = esTday.subtract(humidityPressure).max(0);
     var RHmin = humidityPressure.divide(esTmax).max(0).min(1);
     var Rnday = f.getNumber('Rnday');
     return f.set({
@@ -1031,10 +1210,9 @@ function acclimStep(currentFeat, prevState, params) {
   var esTmin = magnusVP(Tmin);
   var esTmax = magnusVP(Tmax);
   var esTday = magnusVP(Tday);
-  var useTowerHumidity = ee.Algorithms.IsEqual(f.get('weather_source'), 'tower');
-  var humidityPressure = ee.Number(ee.Algorithms.If(useTowerHumidity, f.get('ea'), esTmin));
-  var VPDmax = ee.Number(ee.Algorithms.If(useTowerHumidity, esTmax.subtract(humidityPressure).max(0), esTmax.subtract(esTmin)));
-  var VPDday = ee.Number(ee.Algorithms.If(useTowerHumidity, esTday.subtract(humidityPressure).max(0), esTday.subtract(esTmin)));
+  var humidityPressure = f.getNumber('ea');
+    var VPDmax = esTmax.subtract(humidityPressure).max(0);
+    var VPDday = esTday.subtract(humidityPressure).max(0);
 
   // PARday (umol/m2/s) = 2.2 * SWR(W/m2) * (24/dl)
   var PARday = SWRdaily.multiply(2.2).multiply(ee.Number(24).divide(dl));
@@ -1118,6 +1296,7 @@ function acclimStep(currentFeat, prevState, params) {
     // Instantaneous derived
     esTmin: esTmin, esTmax: esTmax, esTday: esTday,
     VPDmax: VPDmax, VPDday: VPDday, PARday: PARday, Rnday: Rnday, RHmin: RHmin,
+    RHmax: humidityPressure.divide(esTmin).max(0).min(1), VPDmin: esTmin.subtract(humidityPressure).max(0),
     dt: dt, w: w, w_sm: w_sm, tc: p.tc, tc_sm: p.tc_sm
   }).combine(runningNow).combine(diag);
 
@@ -1127,7 +1306,7 @@ function acclimStep(currentFeat, prevState, params) {
   outProps = outProps.combine(ee.Dictionary({
     GPPdaily: GPPdaily, NPPdaily: GPPdaily.multiply(p.CUEplant), CUEplant: p.CUEplant
   }));
-  var outFeat = ee.Feature(f.geometry(), outProps);
+  var outFeat = ee.Feature(f.geometry(), f.toDictionary().combine(outProps, true));
 
   // Return updated state
   return ee.Dictionary({
@@ -1202,8 +1381,8 @@ function soilBucketTrajectory(rows, capacity, keepHistory) {
     var conversion = r.getNumber('daylength').multiply(3600).multiply(days).divide(2450000);
     var wet = r.getNumber('fwet_mean');
     var potential = r.getNumber('PT_mean').multiply(ee.Number(1).subtract(r.getNumber('FIPAR')));
-    var surfaceLE = wet.multiply(potential); // unchanged original surface-water term
-    var potentialMM = ee.Number(1).subtract(wet).multiply(potential.max(0)).multiply(conversion);
+    var surfaceLE = r.getNumber('_bucket_surface');
+    var potentialMM = r.getNumber('_bucket_demand').multiply(days);
     var period = soilBucketPeriod(sm, capacity, pr, potentialMM);
     var fraction = ee.Number(period.get('fraction'));
     var soilMM = ee.Number(period.get('evaporation'));
@@ -1214,7 +1393,7 @@ function soilBucketTrajectory(rows, capacity, keepHistory) {
     var error = totalLE.subtract(r.getNumber('PredLEsday_mean'));
     // Weight monthly mean flux errors by represented days; no fitting on
     // condensation/zero-energy periods, though their precipitation updates SM.
-    var weight = ee.Number(ee.Algorithms.If(potential.gt(0), days, 0));
+    var weight = ee.Number(ee.Algorithms.If(potential.gt(0).and(r.getNumber('bucket_fit_observed').eq(1)), days, 0));
     var out = r.set({SM: sm, SM_mean: period.get('meanSM'), SM_end: nextSM, SMmax: capacity,
       fSM_start: sm.divide(capacity),
       SM_units: 'mm effective evaporative storage', fSM_mean: fraction,
@@ -1238,16 +1417,16 @@ function fitSoilBucket(baseline, options) {
   if (!(cfg.minimum > 0 && cfg.maximum > cfg.minimum && cfg.initial >= cfg.minimum &&
         cfg.initial <= cfg.maximum && cfg.gridSize >= 3 && cfg.gridSize % 1 === 0))
     throw new Error('Invalid soil bucket capacity search settings.');
-  baseline = baseline.sort('millis');
+  baseline = bridgeBucketForcing(baseline.sort('millis'));
   var checked = baseline.map(function(f) {
     var required = ['precip', 'period_days', 'daylength', 'fwet_mean', 'PT_mean',
-      'FIPAR', 'fSM_mean', 'PredLEsday_mean', 'PredLEday_mean', 'PredLEcday_mean', 'PredLEiday_mean'];
+      'FIPAR', 'fSM_mean', 'PredLEsday_mean', 'PredLEday_mean', 'PredLEcday_mean', 'PredLEiday_mean', '_bucket_demand', '_bucket_surface'];
     var complete = f.toDictionary(required).size().eq(required.length);
     // Defaults only protect validation expressions; missing values are never filled.
     var d = ee.Dictionary.fromLists(required, ee.List.repeat(-9999, required.length))
       .combine(f.toDictionary(required));
     var valid = complete.and(ee.Number(d.get('precip')).gte(0))
-      .and(ee.Number(d.get('period_days')).gte(28)).and(ee.Number(d.get('period_days')).lte(31))
+      .and(ee.Number(d.get('period_days')).gte(1)).and(ee.Number(d.get('period_days')).lte(31))
       .and(ee.Number(d.get('daylength')).gt(0)).and(ee.Number(d.get('daylength')).lte(24))
       .and(ee.Number(d.get('fwet_mean')).gte(0)).and(ee.Number(d.get('fwet_mean')).lte(1))
       .and(ee.Number(d.get('FIPAR')).gte(0)).and(ee.Number(d.get('FIPAR')).lte(1))
@@ -1255,15 +1434,20 @@ function fitSoilBucket(baseline, options) {
     return f.set('_bucket_valid', valid);
   });
   var validRows = checked.filter(ee.Filter.eq('_bucket_valid', 1));
-  var n = baseline.size();
-  var first = ee.Date(baseline.aggregate_min('millis'));
-  var last = ee.Date(baseline.aggregate_max('millis')).advance(1, 'month');
-  var contiguous = last.difference(first, 'month').round().eq(n);
-  var eligible = n.gte(12).and(validRows.size().eq(n)).and(contiguous);
+  var n = validRows.size();
+  var first = ee.Date(ee.Algorithms.If(n,validRows.aggregate_min('millis'),0));
+  var lastRow = ee.Feature(ee.Algorithms.If(n,validRows.sort('millis',false).first(),ee.Feature(null,{millis:0,period_days:0})));
+  var last = ee.Date(lastRow.get('millis')).advance(lastRow.getNumber('period_days'),'day');
+  var duration = ee.Number(validRows.aggregate_sum('period_days'));
+  var contiguous = last.difference(first, 'day').round().eq(duration);
+  var eligible = duration.gte(365).and(contiguous);
+  var missingDays = baseline.map(function(f){return f.set('_missing_days',f.getNumber('period_days').multiply(f.getNumber('bucket_forcing_missing_pct')).divide(100));}).aggregate_sum('_missing_days');
+  var missingPct = ee.Number(missingDays).divide(ee.Number(baseline.aggregate_sum('period_days')).max(1)).multiply(100);
   var rows = validRows.toList(validRows.size());
+  var scoringRows=validRows.select(['precip','period_days','daylength','fwet_mean','PT_mean','FIPAR','PredLEsday_mean','_bucket_surface','_bucket_demand','bucket_fit_observed']).toList(validRows.size());
   function score(cap) {
     cap = ee.Number(cap);
-    var trajectory = soilBucketTrajectory(rows, cap, false);
+    var trajectory = soilBucketTrajectory(scoringRows, cap, false);
     return ee.Feature(null, {capacity: cap,
       mse: ee.Number(trajectory.get('sse')).divide(ee.Number(trajectory.get('weight')).max(1))});
   }
@@ -1305,7 +1489,7 @@ function fitSoilBucket(baseline, options) {
   var status = ee.String(ee.Algorithms.If(allFull, 'unconstrained_full_bucket', ee.Algorithms.If(eligible,
     ee.Algorithms.If(informative, ee.Algorithms.If(boundary, 'fitted_at_search_boundary', 'fitted'),
       'baseline_unidentifiable_capacity'), 'baseline_requires_complete_contiguous_year')));
-  var fallback = baseline.map(function(f) {
+  var fallback = validRows.map(function(f) {
     var potential = f.getNumber('PT_mean').multiply(ee.Number(1).subtract(f.getNumber('FIPAR')));
     var surface = f.getNumber('fwet_mean').multiply(potential);
     var soil = ee.Number(1).subtract(f.getNumber('fwet_mean')).multiply(potential.max(0));
@@ -1318,11 +1502,11 @@ function fitSoilBucket(baseline, options) {
       PredLEday_mean: ee.Algorithms.If(allFull, fullLE.add(f.getNumber('PredLEcday_mean'))
         .add(f.getNumber('PredLEiday_mean')), f.get('PredLEday_mean'))});
   });
-  return ee.FeatureCollection(ee.Algorithms.If(apply, ee.FeatureCollection(ee.List(fitted.get('history'))), fallback))
+  return ee.FeatureCollection(ee.Algorithms.If(apply, ee.FeatureCollection(ee.List(fitted.get('history'))), fallback)).merge(checked.filter(ee.Filter.eq('_bucket_valid',0))).sort('millis')
     .map(function(f) { return f.set({SM_fit_status: status,
       SM_fit_RMSE: ee.Algorithms.If(apply, best.getNumber('mse').sqrt(), null),
       SM_initial_guess: cfg.initial, SM_search_min: cfg.minimum, SM_search_max: cfg.maximum,
-      SM_initialization: 'full; no spin-up', precip_units: 'mm/month'}); });
+      SM_initialization: 'full at first bracketed forcing; no spin-up', precip_units: 'mm/period', bucket_record_missing_pct: missingPct}); });
 }
 
 
@@ -1334,7 +1518,7 @@ function fitETBucket(nearSurface, options) {
   nearSurface = nearSurface.sort('millis');
   var proxy = nearSurface.map(function(f) {
     var properties = f.toDictionary(['date', 'millis', 'precip', 'period_days',
-      'daylength', 'fwet_mean', 'PT_mean', 'fSM_mean']);
+      'daylength', 'fwet_mean', 'PT_mean', 'fSM_mean','model_valid','bucket_forcing_missing_pct','bucket_fit_observed']);
     return ee.Feature(null, properties.combine(ee.Dictionary({FIPAR: 0,
       PredLEsday_mean: f.get('PredLEday_RHVPD'),
       PredLEday_mean: f.get('PredLEday_RHVPD'),
@@ -1560,6 +1744,8 @@ function applySharedFPAR(f, p) {
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
+  var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
+  forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
@@ -1570,17 +1756,47 @@ function runACCLIM(forcingFC, params) {
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
-  var forcingList = forcingFC.sort('millis').toList(forcingFC.size());
+  var ordered = forcingFC.sort('millis').toList(forcingFC.size());
+  // Retain elapsed time across unavailable physiological periods; do not invent carbon.
+  var forcingList = ee.List.sequence(0,ordered.size().subtract(1)).map(function(i) {
+    i=ee.Number(i);var f=ee.Feature(ordered.get(i));
+    var previous=ee.Feature(ordered.get(i.subtract(1).max(0)));
+    return f.set('dt',ee.Algorithms.If(i.eq(0),f.get('period_days'),
+      f.getNumber('millis').subtract(previous.getNumber('millis')).divide(86400000)));
+  });
   var initial = computeInitialState(forcingList, p);
   var finalState = ee.Dictionary(forcingList.iterate(function(curr, prev) {
     return acclimStep(curr, prev, p);
   }, initial));
-  var baseline = ee.FeatureCollection(ee.List(finalState.get('history')));
-  var nearSurface = fitSoilBucket(baseline, p.soilBucket);
+  var baseline = ee.FeatureCollection(ee.List(finalState.get('history'))).merge(missingForcing).sort('millis');
+  if (p.deferBuckets) return baseline;
+  return finishACCLIM(baseline,p);
+}
+
+function finishACCLIM(baseline, params) {
+  var p=mergeParams(ACCLIM_PARAMS,params||{});
+  if(p.faparMethod==='EVI2' && p.fitEVI2 && !p.faparFit) {
+    p.faparFit=fitEVI2FAPAR(baseline.filter(ee.Filter.notNull(['PredGPPmean'])),p);
+    if(p.fitEVI2maxFixed)p.faparFit=fixedUpperEVI2Fit(p.faparFit);
+  }
+  var nearSurface = p.fittedBuckets ? null : fitSoilBucket(baseline, p.soilBucket);
   // Convert final partitioned fluxes after the soil-bucket update. Monthly rows
   // report equivalent mean daily water depths using their computed daylength;
   // these are not monthly totals. Nighttime flux is assumed zero.
-  return fitETBucket(nearSurface, p.etBucket).map(function(f) {
+  var bucketOutput = p.fittedBuckets || fitETBucket(nearSurface, p.etBucket);
+  var missingOutput = bucketOutput.filter(ee.Filter.eq('model_valid',0)).map(function(f) {
+    // Bucket interpolation must never manufacture carbon or other physiology.
+    var keep=f.propertyNames().filter(ee.Filter.stringStartsWith('item','SM'))
+      .cat(f.propertyNames().filter(ee.Filter.stringStartsWith('item','bucket_')))
+      .cat(['date','millis','period_days','daylength','model_cadence','model_valid','weather_source',
+        'weather_missing_pct','weather_dataset','weather_scale_m','weather_source_missing_pct','weather_gapfill_provenance',
+        'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_status',
+        'satellite_date_basis','satellite_gap_days','satellite_left_date','satellite_right_date','satellite_max_gap_days',
+        'Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','NDVI','EVI2','red','nir',
+        'precip','precip_units','fSM_mean','fSM_et_mean']);
+    return ee.Feature(f.geometry(),f.toDictionary(keep));
+  });
+  return bucketOutput.filter(ee.Filter.notNull(['PredGPPmean'])).map(function(f) {
     f = f.set('FAPAR_method_requested', p.faparMethod);
     if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
       f = f.set({FAPAR_method: 'EVI2', FAPAR_fit_status: 'fixed bounds',
@@ -1612,7 +1828,7 @@ function runACCLIM(forcingFC, params) {
       E_mm_day: f.getNumber('PredLEsday_mean').multiply(factor),
       I_mm_day: f.getNumber('PredLEiday_mean').multiply(factor)
     });
-  });
+  }).merge(missingOutput).sort('millis');
 }
 
 /**
@@ -1738,37 +1954,60 @@ function attachLandsatLST(output, geom, start, end) {
   });
 }
 
+function runForGeometryAsync(geom,start,end,params,config,done) {
+  var request=UI._requestId, cfg=mergeParams(config,{});
+  function materialize(fc,next) {
+    fc.toList(fc.size()).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(rows,error) {
+      if(request!==UI._requestId)return;
+      if(error){done(null,error);return;}
+      try {next(rows,ee.FeatureCollection(rows.map(function(r){return ee.Feature(geom,r);})));
+      } catch(error) {done(null,error.message);}
+    });
+  }
+  function simulate() {
+    setStatus('Aligning satellite observations with weather timesteps...');
+    materialize(assembleSelectedForcing(geom,start,end,cfg),function(rows,forcing) {
+      if(!rows.some(function(r){return r.model_valid===1||r.model_valid===true;})){done(forcing);return;}
+      setStatus('Calculating native '+rows[0].model_cadence+' physiology...');
+      materialize(runACCLIM(forcing,mergeParams(params,{deferBuckets:true})),function(baselineRows,baseline) {
+        setStatus('Fitting soil-water buckets and bridging missing forcing...');
+        var fitted=ee.FeatureCollection(fitNativeBuckets(baselineRows,params).map(function(r){return ee.Feature(geom,r);}));
+        materialize(finishACCLIM(baseline,mergeParams(params,{fittedBuckets:fitted})),function(result,output){done(output);});
+      });
+    });
+  }
+  var monthly=cfg.weatherPlan||!WEATHER_SOURCES[cfg.weatherSource||'TERRACLIMATE'].daily;
+  var first=monthly?start.slice(0,7)+'-01':start;
+  var last=monthly?carbonDateString(Date.UTC(Number(end.slice(0,4)),Number(end.slice(5,7)),1)-86400000):end;
+  var spec=SATELLITE_SOURCES[cfg.satelliteSource||'MODIS16'],pad=spec.gap+32;
+  var cursor=carbonDateMillis(first)-pad*86400000, stop=carbonDateMillis(last)+pad*86400000, sampled=[];
+  function satelliteBatch() {
+    if(request!==UI._requestId)return;
+    if(cursor>stop) {
+      cfg.alignedSatellite=carbonRowsToFC(alignSatelliteRows(sampled,first,last,cfg.satelliteSource||'MODIS16'));
+      simulate();return;
+    }
+    var next=Math.min(cursor+90*86400000,stop+86400000),a=carbonDateString(cursor),b=carbonDateString(next-86400000);
+    setStatus('Sampling satellite reflectance: '+a+' to '+b+'...');
+    materialize(sampleSatellite(geom,a,b,cfg.satelliteSource||'MODIS16',true),function(rows) {
+      sampled=sampled.concat(rows);cursor=next;satelliteBatch();
+    });
+  }
+  if(cfg.weatherPlan)satelliteBatch();
+  else {
+    setStatus('Sampling selected weather data...');
+    materialize(sampleWeather(geom,first,last,cfg.weatherSource||'TERRACLIMATE'),function(rows,weather) {
+      cfg.sampledWeather=weather;satelliteBatch();
+    });
+  }
+}
+
 function runForGeometry(geom, startDate, endDate, paramOverrides, config) {
   config = config || {};
-  if (config.weatherPlan) {
-    // Use the same full-window vegetation samples and FAPAR fit in both weather modes.
-    var firstTowerMonth=ee.Date(startDate.slice(0,7)+'-01');
-    var towerEnd=ee.Date(endDate.slice(0,7)+'-01').advance(1,'month');
-    var fullModis=fetchModisVI(geom,firstTowerMonth,towerEnd.advance(-1,'day'),config.scale||DEFAULTS.sampleScale);
-    var allVI=ee.FeatureCollection(ee.Algorithms.If(fullModis.size().gt(0),
-      ee.FeatureCollection(ee.List.sequence(0,towerEnd.difference(firstTowerMonth,'month').subtract(1)).map(function(i){
-        var month=firstTowerMonth.advance(i,'month');return aggregateModisToMonth(fullModis,month,month.advance(1,'month'));
-      })),ee.FeatureCollection([])));
-    var groups=[];
-    config.weatherPlan.segments.forEach(function(rows){
-      var forcing=assembleForcing(geom,rows[0].month+'-01',ee.Date(rows[rows.length-1].month+'-01').advance(1,'month').advance(-1,'day'),{towerWeatherRows:rows,modis:fullModis,scale:config.scale});
-      groups.push(forcing);
-    });
-    var overrides=mergeParams(paramOverrides||{},{});
-    if(overrides.faparMethod==='EVI2' && overrides.fitEVI2)overrides.faparFit=fitEVI2FAPAR(allVI, overrides);
-    var result=ee.FeatureCollection([]);
-    groups.forEach(function(forcing){result=result.merge(ee.FeatureCollection(ee.Algorithms.If(forcing.size().gt(0),runACCLIM(forcing,overrides),ee.FeatureCollection([]))));});
-    var missing=ee.FeatureCollection(config.weatherPlan.missing.map(function(month){return ee.Feature(geom,{date:month+'-01',millis:ee.Date(month+'-01').millis(),weather_source:'tower',weather_status:'missing_weather'});}));
-    return result.merge(missing).sort('millis').map(function(f){return f.set('weather_fields',JSON.stringify(config.weatherPlan.source));});
-  }
-
-  // Include every month intersecting the inclusive requested date range.
-  // This prevents mid-month requests from losing their first month's forcing.
-  var firstMonth = ee.Date(ee.Date(startDate).format('YYYY-MM-01'));
-  var lastDay = ee.Date(ee.Date(endDate).format('YYYY-MM-01')).advance(1, 'month').advance(-1, 'day');
-  var forcing = assembleForcing(geom, firstMonth, lastDay, config);
-  return ee.FeatureCollection(ee.Algorithms.If(forcing.size().gt(0),
-    runACCLIM(forcing, paramOverrides), ee.FeatureCollection([])));
+  var forcing = assembleSelectedForcing(geom,startDate,endDate,config);
+  var usable = forcing.filter(ee.Filter.eq('model_valid',1));
+  return ee.FeatureCollection(ee.Algorithms.If(usable.size().gt(0),
+    runACCLIM(forcing,paramOverrides),forcing));
 }
 
 /**
@@ -1911,6 +2150,206 @@ function carbonAllocation(context, p) {
  * the original monthly means. Edges are held only within an available month;
  * missing months stay missing and interpolation never bridges them.
  */
+// Aggregate native daily results for monthly charts without rerunning physiology.
+function alignSatelliteRows(observations,start,end,key) {
+  var spec=SATELLITE_SOURCES[key],groups={};
+  observations.forEach(function(r){var k=String(r.millis),n=r.satellite_observation_count||1;
+    if(!groups[k])groups[k]={millis:r.millis,red:0,nir:0,n:0};
+    groups[k].red+=r.red*n;groups[k].nir+=r.nir*n;groups[k].n+=n;
+  });
+  var obs=Object.keys(groups).map(function(k){var g=groups[k];return {millis:g.millis,red:g.red/g.n,nir:g.nir/g.n};})
+    .sort(function(a,b){return a.millis-b.millis;}),rows=[],j=0;
+  for(var t=carbonDateMillis(start);t<=carbonDateMillis(end);t+=86400000) {
+    while(j<obs.length && obs[j].millis<t)j++;
+    var r=obs[j],l=r&&r.millis===t?r:obs[j-1];
+    var gap=l&&r?(r.millis-l.millis)/86400000:null,valid=l&&r&&gap<=spec.gap,same=valid&&gap===0;
+    var row={date:carbonDateString(t),millis:t,satellite_source:key,satellite_scale_m:spec.scale,
+      satellite_date_basis:spec.kind==='vi'?'pixel observation date':spec.days===1?'observation date':'composite midpoint',
+      satellite_status:valid?(same?'observed':'interpolated'):'unavailable',satellite_missing_pct:same?0:100,
+      satellite_unavailable_pct:valid?0:100,satellite_gap_days:valid?gap:null,satellite_max_gap_days:spec.gap,
+      satellite_left_date:valid?carbonDateString(l.millis):null,satellite_right_date:valid?carbonDateString(r.millis):null};
+    if(valid) {
+      var w=gap?(t-l.millis)/(r.millis-l.millis):0;
+      row.red=l.red+(r.red-l.red)*w;row.nir=l.nir+(r.nir-l.nir)*w;
+      row.NDVI=(row.nir-row.red)/(row.nir+row.red);
+      row.EVI2=Math.max(0,Math.min(1,2.5*(row.nir-row.red)/(row.nir+2.4*row.red+1)));
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function aggregateModelMonths(rows) {
+  if (!rows.length || rows[0].model_cadence !== 'daily') return rows;
+  var groups={};rows.forEach(function(r){var k=r.date.slice(0,7);if(!groups[k])groups[k]=[];groups[k].push(r);});
+  return Object.keys(groups).sort().map(function(k) {
+    var list=groups[k], result={}, fields={};
+    list.forEach(function(r){Object.keys(r).forEach(function(f){fields[f]=true;});});
+    Object.keys(fields).forEach(function(f) {
+      var numeric=list.filter(function(r){return carbonFinite(r[f]);});
+      if(numeric.length) {
+        var total=0,weight=0;
+        var daylight=/^(PredGPP|GPPmax|Amax|PredLE|PT_mean|PARday|Rnday|WUE|gs$|rs$|cica)/.test(f);
+        numeric.forEach(function(r){var w=daylight?(r.daylength||0):1;total+=r[f]*w;weight+=w;});
+        result[f]=weight?total/weight:null;
+      } else {
+        var first=list[0][f];result[f]=list.every(function(r){return r[f]===first;})?first:'mixed';
+        if(first===null||first===undefined)result[f]=null;
+      }
+    });
+    result.date=k+'-01';result.millis=carbonDateMillis(result.date);result['system:time_start']=result.millis;
+    result.year=Number(k.slice(0,4));result.month=Number(k.slice(5));
+    result.period_days=list.length;result.model_cadence='daily';result.output_cadence='monthly';
+    result.aggregation='daily simulation; daytime flux means weighted by daylight duration';
+    result.valid_model_days=list.filter(function(r){return carbonFinite(r.PredGPPmean);}).length;
+    result.model_missing_pct=100*(1-result.valid_model_days/list.length);
+    result.Tdaily_valid_days=list.filter(function(r){return carbonFinite(r.Tdaily);}).length;
+    ['precip','GPPdaily','NPPdaily'].forEach(function(f) {
+      var valid=list.filter(function(r){return carbonFinite(r[f]);});
+      var sum=valid.reduce(function(a,r){return a+r[f];},0);
+      var name=f==='precip'?'precip':f.replace('daily','_period_gC_m2');
+      result[name]=valid.length===list.length?sum:null;
+      result[name+'_available_sum']=valid.length?sum:null;
+    });
+    result.precip_units='mm/represented period';
+    return result;
+  });
+}
+function carbonSummaryRows(daily,annual) {
+  var groups={};daily.forEach(function(r){var key=r.date.slice(0,annual?4:7);if(!groups[key])groups[key]=[];groups[key].push(r);});
+  return Object.keys(groups).sort().map(function(k) {
+    var rows=groups[k],year=Number(k.slice(0,4)),month=annual?0:Number(k.slice(5))-1;
+    var first=Date.UTC(year,month,1),last=annual?Date.UTC(year+1,0,1):Date.UTC(year,month+1,1);
+    var expected=(last-first)/86400000, out={date:carbonDateString(first),year:year,
+      expected_days:expected,requested_days:rows.length,output_cadence:annual?'annual':'monthly'};
+    ['GPPdaily','NPPdaily','NPPgrass','NPPshrub','NPPtree'].forEach(function(f) {
+      var valid=rows.filter(function(r){return carbonFinite(r[f]);});
+      var sum=valid.reduce(function(a,r){return a+r[f];},0),name=f.replace('daily','')+'_gC_m2';
+      out[name]=valid.length===expected?sum:null;out[name+'_available_sum']=valid.length?sum:null;
+      out[f+'_missing_pct']=100*(1-valid.length/rows.length);out[f+'_coverage_pct']=100*valid.length/expected;
+    });
+    return out;
+  });
+}
+
+// Numeric counterpart of soilBucketPeriod. Used by the interactive app to avoid
+// expanding capacity-search trajectories into a large Earth Engine expression.
+function nativeBucketPeriod(sm,capacity,precip,potential) {
+  var q=potential/capacity,surplus=precip-potential,gap=Math.max(0,capacity-sm)/Math.max(surplus,1e-12),x=q*gap;
+  var logRatio=x<1e-5?1-x/2+x*x/3:Math.log(1+x)/Math.max(x,1e-30);
+  var t=surplus>0?Math.min(1,gap*logRatio):1,z=q*t,decay=Math.exp(-z);
+  var phi=z<1e-4?1-z/2+z*z/6-z*z*z/24:(1-decay)/Math.max(z,1e-30);
+  var psi=z<1e-4?.5-z/6+z*z/24-z*z*z/120:(1-phi)/Math.max(z,1e-30);
+  var mean=Math.max(0,Math.min(capacity,sm*t*phi+precip*t*t*psi+capacity*(1-t)));
+  var evaporation=potential*mean/capacity,overflow=Math.max(0,surplus)*(1-t);
+  return {meanSM:mean,fraction:mean/capacity,evaporation:evaporation,overflow:overflow,
+    endSM:Math.max(0,Math.min(capacity,sm+precip-evaporation-overflow))};
+}
+function nativeBucketBridge(input) {
+  var fields=['_bucket_rain','_bucket_demand','_bucket_surface','PT_mean','FIPAR','fwet_mean','fSM_mean',
+    'PredLEsday_mean','PredLEday_mean','PredLEcday_mean','PredLEiday_mean'];
+  var rows=input.map(function(r) {
+    var f=mergeParams(r,{}),valid=['PT_mean','FIPAR','fwet_mean','daylength'].every(function(k){return carbonFinite(f[k]);});
+    var demand=f.PT_mean*(1-f.FIPAR);
+    f._bucket_rain=carbonFinite(f.precip)?f.precip/f.period_days:null;
+    f._bucket_demand=valid?Math.max(0,demand)*(1-f.fwet_mean)*f.daylength*3600/2450000:null;
+    f._bucket_surface=valid?demand*f.fwet_mean:null;
+    f.bucket_forcing_missing_pct=f.bucket_forcing_missing_pct>0||fields.some(function(k){return !carbonFinite(f[k]);})?100:0;
+    return f;
+  }).sort(function(a,b){return a.millis-b.millis;});
+  fields.forEach(function(k) {
+    var valid=rows.filter(function(r){return carbonFinite(r[k]);}),j=0;
+    rows.forEach(function(r) {
+      while(j<valid.length&&valid[j].millis<r.millis)j++;
+      if(carbonFinite(r[k]))return;
+      var l=valid[j-1],right=valid[j];
+      if(l&&right)r[k]=l[k]+(right[k]-l[k])*(r.millis-l.millis)/(right.millis-l.millis);
+    });
+  });
+  rows.forEach(function(r) {
+    r.precip=carbonFinite(r._bucket_rain)?r._bucket_rain*r.period_days:null;
+    r.bucket_fit_observed=r.bucket_forcing_missing_pct?0:1;
+    r.bucket_forcing_status=!r.bucket_forcing_missing_pct?'supplied':fields.every(function(k){return carbonFinite(r[k]);})?'interpolated':'unavailable';
+  });
+  return rows;
+}
+function nativeBucketTrajectory(rows,capacity,history) {
+  var sm=capacity,sse=0,weight=0,out=[];
+  rows.forEach(function(r) {
+    var conversion=r.daylength*3600*r.period_days/2450000;
+    var p=nativeBucketPeriod(sm,capacity,r.precip,r._bucket_demand*r.period_days);
+    var soilLE=p.evaporation/conversion,totalLE=r._bucket_surface+soilLE;
+    var w=r.PT_mean*(1-r.FIPAR)>0 && r.bucket_fit_observed===1?r.period_days:0;
+    sse+=Math.pow(totalLE-r.PredLEsday_mean,2)*w;weight+=w;
+    if(history)out.push(mergeParams(r,{SM:sm,SM_mean:p.meanSM,SM_end:p.endSM,SMmax:capacity,
+      fSM_start:sm/capacity,SM_units:'mm effective evaporative storage',fSM_mean:p.fraction,
+      fSM_RHVPD:r.fSM_mean,PredLEsday_RHVPD:r.PredLEsday_mean,PredLEday_RHVPD:r.PredLEday_mean,
+      PredLEs_surface_mean:r._bucket_surface,PredLEs_soil_mean:soilLE,
+      Esoil_period:p.evaporation,Esurface_period:r._bucket_surface*conversion,bucket_overflow:p.overflow,
+      bucket_water_limited:r._bucket_demand>0&&p.fraction<1?1:0,
+      SM_integration:'analytic period mean; uniform precipitation within period',
+      PredLEsday_mean:totalLE,PredLEday_mean:r.PredLEcday_mean+r.PredLEiday_mean+totalLE}));
+    sm=p.endSM;
+  });
+  return {mse:sse/Math.max(1,weight),weight:weight,history:out};
+}
+function nativeFitBucket(input,options) {
+  var cfg=mergeParams(SOIL_BUCKET,options||{});
+  if(!(cfg.minimum>0&&cfg.maximum>cfg.minimum&&cfg.initial>=cfg.minimum&&cfg.initial<=cfg.maximum&&cfg.gridSize>=3&&cfg.gridSize%1===0))throw new Error('Invalid bucket capacity settings.');
+  var rows=nativeBucketBridge(input),required=['precip','period_days','daylength','fwet_mean','PT_mean','FIPAR','fSM_mean',
+    'PredLEsday_mean','PredLEday_mean','PredLEcday_mean','PredLEiday_mean','_bucket_demand','_bucket_surface'];
+  function valid(r){return required.every(function(k){return carbonFinite(r[k]);})&&r.precip>=0&&r.period_days>=1&&r.period_days<=31&&r.daylength>0&&r.daylength<=24&&r.fwet_mean>=0&&r.fwet_mean<=1&&r.FIPAR>=0&&r.FIPAR<=1&&r.fSM_mean>=0&&r.fSM_mean<=1;}
+  var fitRows=rows.filter(valid),duration=fitRows.reduce(function(a,r){return a+r.period_days;},0);
+  var eligible=fitRows.length&&duration>=365&&Math.round((fitRows[fitRows.length-1].millis-fitRows[0].millis)/86400000+fitRows[fitRows.length-1].period_days)===duration;
+  var best={capacity:cfg.initial,mse:0},spread=0,informative=false,apply=false,allFull=false;
+  function score(cap){return {capacity:cap,mse:nativeBucketTrajectory(fitRows,cap,false).mse};}
+  if(eligible) {
+    var lo=Math.log(cfg.minimum),hi=Math.log(cfg.maximum),step=(hi-lo)/(cfg.gridSize-1);
+    best=score(cfg.initial);var min=Infinity,max=-Infinity;
+    for(var i=0;i<cfg.gridSize;i++){var candidate=score(Math.exp(lo+i*step));min=Math.min(min,candidate.mse);max=Math.max(max,candidate.mse);if(candidate.mse<best.mse)best=candidate;}
+    spread=max-min;
+    for(var pass=0;pass<3;pass++){
+      var center=Math.log(best.capacity),challenger=best;
+      for(var j=-4;j<=4;j++){var refined=score(Math.exp(Math.max(lo,Math.min(hi,center+j*step/4))));if(refined.mse<challenger.mse)challenger=refined;}
+      best=challenger;step/=4;
+    }
+    informative=spread>1e-8&&nativeBucketTrajectory(fitRows,best.capacity,false).weight>0;
+    allFull=fitRows.every(function(r){return r.precip>=Math.max(0,r.PT_mean*(1-r.FIPAR))*(1-r.fwet_mean)*r.daylength*3600*r.period_days/2450000;});
+    apply=informative&&!allFull;
+  }
+  var boundary=best.capacity<=cfg.minimum*1.001||best.capacity>=cfg.maximum/1.001;
+  var status=allFull?'unconstrained_full_bucket':!eligible?'baseline_requires_complete_contiguous_year':
+    informative?(boundary?'fitted_at_search_boundary':'fitted'):'baseline_unidentifiable_capacity';
+  var fitted=apply?nativeBucketTrajectory(fitRows,best.capacity,true).history:fitRows.map(function(r){
+    var f=mergeParams(r,{fSM_RHVPD:r.fSM_mean,PredLEsday_RHVPD:r.PredLEsday_mean,PredLEday_RHVPD:r.PredLEday_mean});
+    if(allFull){var potential=r.PT_mean*(1-r.FIPAR),full=r.fwet_mean*potential+(1-r.fwet_mean)*Math.max(0,potential);
+      f.fSM_mean=1;f.fSM_start=1;f.PredLEsday_mean=full;f.PredLEday_mean=full+r.PredLEcday_mean+r.PredLEiday_mean;}
+    return f;
+  });
+  var totalDays=rows.reduce(function(a,r){return a+r.period_days;},0);
+  var missing=rows.reduce(function(a,r){return a+r.period_days*r.bucket_forcing_missing_pct;},0)/Math.max(1,totalDays);
+  return fitted.concat(rows.filter(function(r){return !valid(r);})).sort(function(a,b){return a.millis-b.millis;}).map(function(r){return mergeParams(r,{
+    SM_fit_status:status,SM_fit_RMSE:apply?Math.sqrt(best.mse):null,SM_initial_guess:cfg.initial,SM_search_min:cfg.minimum,SM_search_max:cfg.maximum,
+    SM_initialization:'full at first bracketed forcing; no spin-up',precip_units:'mm/period',bucket_record_missing_pct:missing});});
+}
+function fitNativeBuckets(input,params) {
+  var p=mergeParams(ACCLIM_PARAMS,params||{}),near=nativeFitBucket(input,p.soilBucket);
+  var proxy=near.map(function(r){var f={};['date','millis','precip','period_days','daylength','fwet_mean','PT_mean','fSM_mean','model_valid','bucket_forcing_missing_pct','bucket_fit_observed'].forEach(function(k){f[k]=r[k];});
+    return mergeParams(f,{FIPAR:0,PredLEsday_mean:r.PredLEday_RHVPD,PredLEday_mean:r.PredLEday_RHVPD,PredLEcday_mean:0,PredLEiday_mean:0});});
+  var et=nativeFitBucket(proxy,p.etBucket);
+  return near.map(function(r,i){var e=et[i],hasFit=carbonFinite(e.SMmax),full=e.SM_fit_status==='unconstrained_full_bucket';
+    function fitted(k){return hasFit?e[k]:null;}function moisture(k){return full?e[k]:fitted(k);}
+    var result=mergeParams(r,{SM_et:fitted('SM'),SM_et_mean:fitted('SM_mean'),SM_et_end:fitted('SM_end'),SMmax_et:fitted('SMmax'),
+      fSM_et_mean:moisture('fSM_mean'),fSM_et_start:moisture('fSM_start'),PredLE_ETeffective:moisture('PredLEsday_mean'),PredLE_ETreference:r.PredLEday_RHVPD,
+      ETbucket_period:fitted('Esoil_period'),ETsurface_period:fitted('Esurface_period'),ETbucket_overflow:fitted('bucket_overflow'),
+      SM_et_fit_status:e.SM_fit_status,SM_et_fit_RMSE:e.SM_fit_RMSE,SM_et_initial_guess:e.SM_initial_guess,SM_et_search_min:e.SM_search_min,
+      SM_et_search_max:e.SM_search_max,SM_et_initialization:e.SM_initialization,SM_et_integration:fitted('SM_integration'),
+      SM_et_units:'mm effective ET storage',ETbucket_period_units:'mm/period'});
+    Object.keys(result).forEach(function(k){if(result[k]===undefined)result[k]=null;});
+    return result;
+  });
+}
+
 function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overrides) {
   var p = mergeParams(ACCLIM_PARAMS, overrides || {});
   if (!carbonFinite(p.CUEplant) || p.CUEplant < 0 || p.CUEplant > 1)
@@ -1924,9 +2363,10 @@ function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overri
   // g C -> kg C -> lb C, using the same conversion constants as RAP.
   var conversion = 0.001 * CARBON_UNITS.poundsPerKilogram * CARBON_UNITS.squareMetresPerAcre;
   var monthly = {}, annual = {}, allocations = {};
+  var nativeDaily = monthlyRows.length && monthlyRows[0].model_cadence === 'daily';
   annualRows.forEach(function(r) { annual[r.year] = r; });
   monthlyRows.forEach(function(r) {
-    var ms = carbonDateMillis(r.date), key = carbonMonthKey(ms);
+    var ms = carbonDateMillis(r.date), key = nativeDaily ? r.date : carbonMonthKey(ms);
     if (monthly.hasOwnProperty(key)) throw new Error('Duplicate model month: ' + r.date);
     var d = new Date(ms);
     var valid = carbonFinite(r.PredGPPmean) && r.PredGPPmean >= 0 &&
@@ -1937,8 +2377,9 @@ function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overri
   var daily = [], windows = {}, periods = [];
   for (var ms = start; ms <= end; ms += dayMs) {
     var date = new Date(ms), year = date.getUTCFullYear(), key = carbonMonthKey(ms);
-    var current = monthly[key], gpp = null, mode = 'missing_month';
-    if (current && carbonFinite(current.gpp)) {
+    var current = monthly[nativeDaily ? carbonDateString(ms) : key], gpp = null, mode = nativeDaily ? 'missing_day' : 'missing_month';
+    if (nativeDaily && current && carbonFinite(current.gpp)) { gpp=current.gpp; mode='native_daily'; }
+    if (!nativeDaily && current && carbonFinite(current.gpp)) {
       var left = ms < current.anchor ? monthly[key - 1] : current;
       var right = ms < current.anchor ? current : monthly[key + 1];
       if (left && right && carbonFinite(left.gpp) && carbonFinite(right.gpp)) {
@@ -2068,18 +2509,11 @@ function fetchCarbonAnnualContext(geom, startDate, endDate, config) {
       rows.push(ee.Feature(null,cover.combine(ee.Dictionary(towerAnnualTemperature(config.weatherPlan,y))).combine(ee.Dictionary({year:y,coverImages:coverIC.size()}))));
       continue;
     }
-    var temperature = ee.ImageCollection(DATASETS.TERRACLIMATE).filterDate(yearStart, yearEnd)
-      .map(function(img) {
-        return img.select('tmmn').add(img.select('tmmx')).multiply(0.05).rename('MAT');
-      });
-    var blankMAT = ee.Image.constant(0).rename('MAT').updateMask(ee.Image.constant(0));
-    var matImage = ee.Image(ee.Algorithms.If(temperature.size().eq(12),
-      temperature.mean().updateMask(temperature.count().eq(12)), blankMAT));
-    var mat = matImage.reduceRegion({reducer: ee.Reducer.mean(), geometry: geom,
-      scale: config.scale || DEFAULTS.sampleScale, bestEffort: true, maxPixels: 1e10});
-    rows.push(ee.Feature(null, cover.combine(mat).combine(ee.Dictionary({
-      year: y, temperatureMonths: temperature.size(), coverImages: coverIC.size()
-    }))));
+    var weather=sampleWeather(geom,yearStart,yearEnd.advance(-1,'day'),config.weatherSource||'TERRACLIMATE');
+    var validWeather=weather.filter(ee.Filter.notNull(['Tdaily'])).map(function(f){return f.set('_tdays',f.getNumber('Tdaily').multiply(f.getNumber('period_days')));});
+    var days=ee.Number(validWeather.aggregate_sum('period_days'));
+    var mat=ee.Algorithms.If(days.eq(yearEnd.difference(yearStart,'day')),ee.Number(validWeather.aggregate_sum('_tdays')).divide(days.max(1)),null);
+    rows.push(ee.Feature(null,cover.combine(ee.Dictionary({MAT:mat,year:y,temperatureMonths:12,temperature_days:days,coverImages:coverIC.size()}))));
   }
   return ee.FeatureCollection(rows);
 }
@@ -2178,6 +2612,7 @@ function annualClimateNote(rows, start, end, variable) {
       var row = months[('0' + m).slice(-2)];
       var n = new Date(Date.UTC(Number(year), m, 0)).getUTCDate();
       if (!row || !carbonFinite(row[variable])) { complete = false; continue; }
+      if(variable==='Tdaily' && row.model_cadence==='daily' && row.Tdaily_valid_days!==n)complete=false;
       sum += row[variable] * (variable === 'Tdaily' ? n : 1);
       days += n;
     }
@@ -2227,7 +2662,7 @@ function loadCarbonProducts(output, geom, start, end, requestId, regionName, c4C
   try { fetchSoilGridsSand(geom).evaluate(ready); } catch (error) { ready(null, error); }
 }
 function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, sandPercent, c4Chart) {
-  var context = fetchCarbonAnnualContext(geom, start, end, {weatherPlan:UI._runWeatherPlan});
+  var context = fetchCarbonAnnualContext(geom, start, end, {weatherPlan:UI._runWeatherPlan,weatherSource:UI._lastRun.weatherSource,satelliteSource:UI._lastRun.satelliteSource});
   var monthlyProperties = output.toList(output.size()).map(function(f) { return ee.Feature(f).toDictionary(); });
   var annualProperties = context.toList(context.size()).map(function(f) { return ee.Feature(f).toDictionary(); });
   ee.Dictionary({monthly: monthlyProperties, annual: annualProperties}).evaluate(function(result, error) {
@@ -2249,6 +2684,12 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
         var tDepth = transpirationSourceDepth([row]);
         Object.keys(tDepth).forEach(function(key) { row[key] = tDepth[key]; });
       });
+      var nativeRows=result.monthly;
+      var products = buildCarbonProducts(nativeRows, result.annual, start, end);
+      var byDate={};nativeRows.forEach(function(r){byDate[r.date]=r;});
+      UI._lastNative=carbonRowsToFC(nativeRows);
+      result.monthly=aggregateModelMonths(nativeRows);
+      result.monthly.forEach(function(row){var d=transpirationSourceDepth([row]);Object.keys(d).forEach(function(k){row[k]=d[k];});});
       output = carbonRowsToFC(result.monthly);
       UI._lastOutput = output; // monthly CSV includes AWC and ET, E, and T source depths
       UI._monthlyExportReady = true;
@@ -2261,8 +2702,9 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       Object.keys(selectedPeriodDepth).forEach(function(key) {
         bucketInfo[key] = selectedPeriodDepth[key];
       });
-      var products = buildCarbonProducts(result.monthly, result.annual, start, end);
-      UI._lastDaily = carbonRowsToFC(products.daily);
+      UI._lastDaily = carbonRowsToFC(products.daily.map(function(r){return nativeRows[0].model_cadence==='daily'?mergeParams(byDate[r.date]||{},r):r;}));
+      UI._lastAnnual=carbonRowsToFC(carbonSummaryRows(products.daily,true));
+      UI._lastCarbonMonthly=carbonRowsToFC(carbonSummaryRows(products.daily,false));
       if (UI._annualGPPNote) UI._annualGPPNote.setValue(annualCarbonNote(products.daily, ['GPPdaily'], ['GPP']));
       UI._last16day = carbonRowsToFC(products.npp16day);
       addOptionalSeriesChart({rows: products.daily},
@@ -2324,7 +2766,9 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       var valid = products.daily.filter(function(r) { return carbonFinite(r.NPPdaily); }).length;
       var biomassDays = products.daily.filter(function(r) { return carbonFinite(r.HerbaceousAGBdaily); }).length;
       setStatus('Ready: ' + valid + '/' + products.daily.length + ' days have GPP/NPP; ' +
-        biomassDays + ' have biomass estimates. Incomplete windows have blank full totals in CSV.');
+        biomassDays + ' have biomass estimates. Bucket forcing missing before interpolation: ' +
+        (carbonFinite(bucketInfo.bucket_record_missing_pct)?bucketInfo.bucket_record_missing_pct.toFixed(2)+'%':'unavailable') +
+        '. Incomplete windows have blank full totals in CSV.');
     } catch (e) { setStatus('Carbon products error: ' + e.message); }
   });
 }
@@ -2452,6 +2896,10 @@ UI.inputPanel.add(UI.faparSelector);
 UI.sharedFPAR = ui.Checkbox({label: 'Use FAPAR for both photosynthesis and water fluxes', value: false});
 UI.inputPanel.add(UI.sharedFPAR);
 setupTowerImport();
+UI.weatherSelector=ui.Select({items:Object.keys(WEATHER_SOURCES).map(function(k){return {label:WEATHER_SOURCES[k].label,value:k};}),value:'TERRACLIMATE'});
+UI.satelliteSelector=ui.Select({items:Object.keys(SATELLITE_SOURCES).map(function(k){return {label:SATELLITE_SOURCES[k].label,value:k};}),value:'MODIS16'});
+UI.inputPanel.add(ui.Label('Weather data (applied on Run ACCLIM)')).add(UI.weatherSelector);
+UI.inputPanel.add(ui.Label('Satellite reflectance (applied on Run ACCLIM)')).add(UI.satelliteSelector);
 UI.inputPanel.add(UI.runButton);
 
 UI.statusPanel = ui.Panel({
@@ -2692,7 +3140,7 @@ function setupTowerImport() {
   UI.inputPanel.add(UI.towerNote);
   UI.useTowerWeather=ui.Checkbox({label:'Use Tower Weather Data',value:false});
   UI.inputPanel.add(UI.useTowerWeather);
-  UI.weatherNote=ui.Label({value:'Optional: tower temperature, humidity, shortwave, pressure, precipitation and LE_CORR + H_CORR. Complete months only; no gridded substitutions. CO2 and satellite vegetation remain unchanged.',style:{whiteSpace:'pre-wrap'}});
+  UI.weatherNote=ui.Label({value:'Optional: tower temperature, humidity, shortwave, pressure, precipitation and LE_CORR + H_CORR. Carbon requires complete months; bucket-only gaps are interpolated, with no gridded substitutions. CO2 and satellite vegetation remain unchanged.',style:{whiteSpace:'pre-wrap'}});
   UI.inputPanel.add(UI.weatherNote);
 }
 function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
@@ -2787,6 +3235,9 @@ UI.export16day = ui.Button({label: 'Export 16-day CSV',
   onClick: function() { onExportCarbon('16day'); }, style: {stretch: 'horizontal'}});
 UI.exportPanel.add(UI.exportDaily);
 UI.exportPanel.add(UI.export16day);
+UI.exportPanel.add(ui.Button({label:'Export native model CSV',onClick:function(){if(UI._lastNative)prepareCsvDownload(UI._lastNative,'native');}}));
+UI.exportPanel.add(ui.Button({label:'Export annual carbon CSV',onClick:function(){if(UI._lastAnnual)prepareCsvDownload(UI._lastAnnual,'annual_carbon');}}));
+UI.exportPanel.add(ui.Button({label:'Export monthly carbon CSV',onClick:function(){if(UI._lastCarbonMonthly)prepareCsvDownload(UI._lastCarbonMonthly,'monthly_carbon');}}));
 UI.csvDownloadLink = ui.Label({value: '', style: {shown: false, color: '#1565C0'}});
 UI.exportPanel.add(UI.csvDownloadLink);
 UI.resultsPanel.add(UI.exportPanel);
@@ -2815,6 +3266,7 @@ function setStatus(msg) {
 function clearResults() {
   UI._requestId++;
   UI._monthlyExportReady = false;
+  UI._lastNative=null; UI._lastAnnual=null; UI._lastCarbonMonthly=null;
   UI._downloadRequestId = (UI._downloadRequestId || 0) + 1;
   UI.csvDownloadLink.style().set({shown: false});
   UI._lastOutput = null;
@@ -2940,7 +3392,7 @@ function onRun() {
         UI.weatherNote.setValue('Tower weather unavailable:\n'+UI._runWeatherPlan.rejected.join('\n'));
         throw new Error('No complete tower-weather months. '+UI._runWeatherPlan.rejected.slice(0,2).join(' | ')+'. See the weather note for all months.');
       }
-      UI.weatherNote.setValue('Tower weather selected. Unavailable months: '+(UI._runWeatherPlan.missing.join(', ')||'none')+'. Acclimation and soil-water calculations restart after gaps. CO2 and satellite vegetation remain unchanged. Supplied gap-filled fields are retained.');
+      UI.weatherNote.setValue('Tower weather selected. Unavailable months: '+(UI._runWeatherPlan.missing.join(', ')||'none')+'. Bucket forcing is interpolated between valid periods; missing carbon remains unavailable. CO2 and satellite vegetation remain unchanged. Supplied gap-filled fields are retained.');
     } else {UI.weatherNote.setValue('Gridded weather selected; tower weather is not used.');}
     UI.runButton.setDisabled(true);
     var runRequestId = UI._requestId;
@@ -2952,11 +3404,15 @@ function onRun() {
         return;
       }
       try {
-    var output = runForGeometry(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: UI.faparSelector.getValue() === 'FIPAR' ? 'FIPAR' : 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, {weatherPlan:UI._runWeatherPlan});
+    var runDataConfig={weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
+    runForGeometryAsync(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: UI.faparSelector.getValue() === 'FIPAR' ? 'FIPAR' : 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
+    if(runRequestId!==UI._requestId)return;
+    if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
+    try {
     UI._lastOutput = output;
-    UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:UI._runWeatherPlan?'tower':'gridded'};
+    UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:runDataConfig.weatherPlan?'tower':runDataConfig.weatherSource,satelliteSource:runDataConfig.satelliteSource};
 
-    regionName += UI._runWeatherPlan ? '\nTower weather' : '\nGridded weather';
+    regionName += UI._runWeatherPlan ? '\nTower weather' : '\n'+WEATHER_SOURCES[runDataConfig.weatherSource].label;
     // Center the map on the active geometry so the user sees where they ran.
     if (UI.map) UI.map.centerObject(geom);
 
@@ -2966,6 +3422,7 @@ function onRun() {
     var chartCache = {rows: null, ready: [], refresh: []};
     var c4Chart = function(rows) {
       chartCache.rows = rows;
+      output = carbonRowsToFC(rows);
       addRemainingDiagnosticCharts();
       var resistance = rows.map(function(row) { return row.rs; }).filter(carbonFinite);
       var conductanceOptions = conductanceChart.getOptions();
@@ -3048,6 +3505,8 @@ function onRun() {
     UI.resultsOverlay.setExpanded(true);
     setStatus('Calculating daily carbon totals and loading annual RAP cover...');
     loadCarbonProducts(output, geom, startDate, endDate, runRequestId, regionName, c4Chart);
+    } catch(renderError){UI.runButton.setDisabled(false);setStatus('Chart error: '+renderError.message);}
+    });
       } catch (runError) {
         UI.runButton.setDisabled(false);
         setStatus('Error: ' + runError.message);
@@ -3092,7 +3551,7 @@ function prepareCsvDownload(collection, cadence) {
     .replace(/[^A-Za-z0-9_-]/g, '_');
   var tabular = collection.map(function(f) {
     return f.setGeometry(null).set({export_site: run.site,
-      export_start: run.start, export_end: run.end, export_weather_source: run.weatherSource});
+      export_start: run.start, export_end: run.end, export_weather_source: run.weatherSource,export_satellite_source:run.satelliteSource});
   });
   setStatus('Preparing ' + cadence + ' CSV download...');
   function finish(url, error) {
