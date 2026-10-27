@@ -4,6 +4,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  vm.runInContext(s.match(/var ACCLIM_PARAMS = \{[\s\S]*?\n\};/)[0]+'\n'+s.match(/var SOIL_BUCKET = .*?;/)[0]+'\n'+
  s.slice(s.indexOf('function mergeParams('),s.indexOf('// SECTION 6'))+'\n'+
  'function carbonFinite(x){return typeof x==="number"&&isFinite(x);}\n'+
+ s.slice(s.indexOf('function nativePeriodSeconds('),s.indexOf('function sourceCalendar('))+'\n'+
  s.slice(s.indexOf('function nativeBucketPeriod('),s.indexOf('function buildCarbonProducts(')),ctx);
  const rows=Array.from({length:365},(_,i)=>({date:new Date(Date.UTC(2023,0,1)+i*86400000).toISOString().slice(0,10),millis:Date.UTC(2023,0,1)+i*86400000,
    period_days:1,daylength:12,precip:i%8===0?4:0,PT_mean:120,FIPAR:.5,fwet_mean:.1,fSM_mean:.5,

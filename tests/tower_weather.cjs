@@ -30,11 +30,11 @@ for(const file of ['gee/Acclim_v2_shapefile.js',...(process.env.ACCLIM_PRIVATE_S
  assert.throws(()=>ctx.towerWeatherPlan({...d,weather:{...d.weather,version:1}},'2024-01-01','2024-01-31'),/Reprocess/);
  assert.throws(()=>ctx.towerWeatherPlan({version:3},'2024-01-01','2024-02-01'),/Reprocess/);
 
- // Incomplete monthly weather must remain missing in interpolated daily carbon.
+ // Incomplete monthly weather must remain missing in allocated daily carbon.
  const params=s.match(/var ACCLIM_PARAMS = \{[\s\S]*?\n\};/)[0];
  const merge=s.slice(s.indexOf('function mergeParams('),s.indexOf('// SECTION 6'));
  const carbon=s.slice(s.indexOf('var CARBON_UNITS ='),s.indexOf('// BEGIN CARBON ASYNC UI'));
- const cc={};vm.createContext(cc);vm.runInContext(params+'\n'+merge+'\n'+carbon,cc);
+ const cc={};vm.createContext(cc);vm.runInContext(params+'\n'+merge+'\n'+s.slice(s.indexOf('function nativePeriodSeconds('),s.indexOf('function sourceCalendar('))+'\n'+carbon,cc);
  const products=cc.buildCarbonProducts([{date:'2024-01-01',PredGPPmean:10,daylength:12,weather_source:'tower'}, {date:'2024-02-01',weather_source:'tower',weather_status:'missing_weather'}, {date:'2024-03-01',PredGPPmean:20,daylength:12,weather_source:'tower'}],[],'2024-01-01','2024-03-31');
  assert.ok(products.daily.filter(r=>r.date.startsWith('2024-02')).every(r=>r.GPPdaily===null));
  assert.equal(products.daily[0].weather_source,'tower');

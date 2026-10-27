@@ -453,9 +453,11 @@ function aggregateModisToMonth(modisFC, monthStart, monthEnd) {
  */
 // Daytime radiation: only shortwave is converted from a 24-hour mean.
 // Temperatures are Celsius on input; vapor pressure ea is kPa.
-function griddedDaytimeRn(swrDaily, daylength, tday, ea, albedo, emSurface, p) {
+function griddedDaytimeRn(swrDaily, daylength, tday, ea, albedo, emSurface, p, periodSeconds, daylightSeconds) {
   var kelvin = tday.add(273.15);
-  var swDay = swrDaily.multiply(ee.Number(24).divide(daylength));
+  var seconds=periodSeconds===undefined?ee.Number(86400):ee.Number(periodSeconds);
+  var light=daylightSeconds===undefined?daylength.multiply(3600):ee.Number(daylightSeconds);
+  var swDay=swrDaily.multiply(seconds).divide(light);
   var emAirDay = ee.Number(10).multiply(ea).divide(kelvin).pow(1 / 7).multiply(1.31);
   return ee.Number(1).subtract(albedo).multiply(swDay)
     .add(kelvin.pow(4).multiply(p.sb).multiply(emAirDay.subtract(emSurface)));
@@ -476,6 +478,55 @@ var SATELLITE_SOURCES = {
   MODIS8: {label:'MODIS Terra + Aqua (global / 250 m / 8-day)', ids:['MODIS/061/MOD09Q1','MODIS/061/MYD09Q1'], days:8, scale:250, gap:32, kind:'q1'},
   MODIS16: {label:'MODIS Terra + Aqua (global / 250 m / 16-day)', ids:['MODIS/061/MOD13Q1','MODIS/061/MYD13Q1'], days:16, scale:250, gap:48, kind:'vi'}
 };
+// One temporal contract for every weather adapter. Flux density is kept separate
+// from mass integrated over the represented weather interval.
+function withPeriodTiming(f) {
+  var seconds=ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(f.get('period_seconds'),null),
+    f.getNumber('period_days').multiply(86400),f.get('period_seconds')));
+  var light=ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(f.get('daylight_seconds'),null),
+    seconds.multiply(f.getNumber('daylength')).divide(24),f.get('daylight_seconds')));
+  return f.set({period_seconds:seconds,daylight_seconds:light,period_days:seconds.divide(86400),
+    period_start_millis:f.get('millis'),period_end_millis:f.getNumber('millis').add(seconds.multiply(1000)),
+    period_end_exclusive:ee.Date(f.getNumber('millis').add(seconds.multiply(1000))).format('YYYY-MM-dd'),
+    flux_time_basis:'daytime mean',period_time_units:'seconds'});
+}
+function nativePeriodSeconds(r) {
+  if(carbonFinite(r.period_seconds))return r.period_seconds;
+  if(carbonFinite(r.period_days))return r.period_days*86400;
+  // Compatibility only for older exported rows without an interval contract.
+  var d=new Date(carbonDateMillis(r.date));
+  return r.model_cadence==='daily'?86400:(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)-d.getTime())/1000;
+}
+function nativeDaylightSeconds(r) {
+  return carbonFinite(r.daylight_seconds)?r.daylight_seconds:nativePeriodSeconds(r)*r.daylength/24;
+}
+function periodCarbonByDay(rows,start,end) {
+  var byDay={},previousEnd=-Infinity;
+  rows.slice().sort(function(a,b){return (carbonFinite(a.period_start_millis)?a.period_start_millis:carbonDateMillis(a.date))-
+    (carbonFinite(b.period_start_millis)?b.period_start_millis:carbonDateMillis(b.date));}).forEach(function(r) {
+    var a=carbonFinite(r.period_start_millis)?r.period_start_millis:carbonDateMillis(r.date);
+    var seconds=nativePeriodSeconds(r),light=nativeDaylightSeconds(r),b=a+seconds*1000;
+    if(!(seconds>0))throw new Error('Weather period must have a positive duration: '+r.date);
+    if(a<previousEnd)throw new Error('Overlapping weather periods: '+r.date);
+    previousEnd=b;
+    var valid=carbonFinite(r.PredGPPmean)&&r.PredGPPmean>=0&&carbonFinite(light)&&light>=0&&light<=seconds;
+    var mass=valid?r.PredGPPmean*light*12e-6:null;
+    var first=Math.max(start,Math.floor(a/86400000)*86400000),last=Math.min(end,b-1);
+    for(var t=first;t<=last;t+=86400000) {
+      var overlap=Math.max(0,Math.min(b,t+86400000)-Math.max(a,t))/1000;
+      if(!overlap)continue;
+      var key=carbonDateString(t);
+      if(!byDay[key])byDay[key]={gpp:0,validSeconds:0,coveredSeconds:0,weather_source:r.weather_source||'gridded',mode:'native_daily'};
+      var day=byDay[key];day.coveredSeconds+=overlap;
+      if(valid){day.gpp+=mass*overlap/seconds;day.validSeconds+=overlap;}
+      if(seconds!==86400||a!==t)day.mode='allocated_from_weather_period';
+      if(day.weather_source!==(r.weather_source||'gridded'))day.weather_source='mixed';
+    }
+  });
+  Object.keys(byDay).forEach(function(k){if(Math.abs(byDay[k].validSeconds-86400)>1e-6)byDay[k].gpp=null;});
+  return byDay;
+}
+
 function sourceCalendar(start, end, daily) {
   start = ee.Date(start); end = ee.Date(end);
   if (!daily) start = ee.Date(start.format('YYYY-MM-01'));
@@ -483,7 +534,8 @@ function sourceCalendar(start, end, daily) {
   return ee.FeatureCollection(ee.List.sequence(0, end.difference(start, unit).floor()).map(function(i) {
     var d = start.advance(i, unit), next = d.advance(1, unit);
     return ee.Feature(null, {date:d.format('YYYY-MM-dd'), millis:d.millis(), year:d.get('year'), month:d.get('month'),
-      period_days:next.difference(d,'day'), model_cadence:daily?'daily':'monthly'});
+      period_days:next.difference(d,'day'),period_seconds:next.difference(d,'second'),
+      period_start_millis:d.millis(),period_end_millis:next.millis(), model_cadence:daily?'daily':'monthly'});
   }));
 }
 function sampleWeather(geom, start, end, key) {
@@ -660,11 +712,14 @@ function assembleSelectedForcing(geom,start,end,config) {
     var valid=vi.filter(ee.Filter.notNull(['red','nir']));
     var props=ee.Dictionary({});
     ['red','nir','NDVI','EVI2','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){props=props.set(k,vi.aggregate_mean(k));});
-    var dl=astronomicalDaylength(lat,doyFromDate(ee.Date(t).advance(daily?0:days.divide(2),'day')));
+    var dl=ee.Number(ee.List.sequence(0,days.subtract(1)).map(function(i){
+      return astronomicalDaylength(lat,doyFromDate(ee.Date(t).advance(i,'day')));
+    }).reduce(ee.Reducer.mean()));
     var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(valid.size().eq(days)).and(dl.gt(0));
     if(config.weatherPlan)complete=complete.and(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('tower_weather_valid'),null),0,wf.get('tower_weather_valid'))).eq(1));
     return f.setGeometry(geom).set(wf.toDictionary()).set(props).set({
-      daylength:dl,doy:doyFromDate(ee.Date(t)),dt:days,ca_daily:co2ForDate(ee.Date(t)),
+      daylength:dl,daylight_seconds:dl.multiply(3600).multiply(days),
+      doy:doyFromDate(ee.Date(t)),dt:days,ca_daily:co2ForDate(ee.Date(t)),
       model_cadence:daily?'daily':'monthly',weather_source:config.weatherPlan?'tower':key,
       model_valid:complete,weather_missing_pct:ee.Number(7).subtract(wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip']).size()).multiply(100/7),
       precipitation_missing_pct:ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('precip'),null),100,0),
@@ -684,8 +739,8 @@ function assembleSelectedForcing(geom,start,end,config) {
       .multiply(ea.multiply(10).divide(kelvin).pow(1/7).multiply(1.31).subtract(em)));
     if(config.weatherPlan)rn=f.getNumber('Rndaily');
     return f.set({Tday:tday,albedo:albedo,FIPAR:fipar,Rndaily:rn,
-      Rnday:config.weatherPlan?rn.multiply(24).divide(f.getNumber('daylength')):
-        griddedDaytimeRn(f.getNumber('SWRdaily'),f.getNumber('daylength'),tday,ea,albedo,em,p),
+      Rnday:config.weatherPlan?rn.multiply(f.getNumber('period_seconds')).divide(f.getNumber('daylight_seconds')):
+        griddedDaytimeRn(f.getNumber('SWRdaily'),f.getNumber('daylength'),tday,ea,albedo,em,p,f.getNumber('period_seconds'),f.getNumber('daylight_seconds')),
       esTday:magnusVP(tday),VPDdaily:magnusVP(tday).subtract(ea).max(0)});
   });
   return ready.merge(raw.filter(ee.Filter.eq('model_valid',0))).sort('millis');
@@ -696,8 +751,8 @@ function bridgeBucketForcing(baseline) {
   var prepared=baseline.map(function(f) {
     var valid=f.toDictionary(['PT_mean','FIPAR','fwet_mean','daylength']).size().eq(4);
     var demand=ee.Number(f.get('PT_mean')).multiply(ee.Number(1).subtract(ee.Number(f.get('FIPAR'))));
-    return f.set({_bucket_rain:ee.Algorithms.If(ee.Algorithms.IsEqual(f.get('precip'),null),null,f.getNumber('precip').divide(f.getNumber('period_days'))),
-      _bucket_demand:ee.Algorithms.If(valid,demand.max(0).multiply(ee.Number(1).subtract(f.getNumber('fwet_mean'))).multiply(f.getNumber('daylength')).multiply(3600/2450000),null),
+    return f.set({_bucket_rain:ee.Algorithms.If(ee.Algorithms.IsEqual(f.get('precip'),null),null,f.getNumber('precip').divide(f.getNumber('period_seconds'))),
+      _bucket_demand:ee.Algorithms.If(valid,demand.max(0).multiply(ee.Number(1).subtract(f.getNumber('fwet_mean'))).multiply(f.getNumber('daylight_seconds')).divide(f.getNumber('period_seconds')).divide(2450000),null),
       _bucket_surface:ee.Algorithms.If(valid,demand.multiply(f.getNumber('fwet_mean')),null)});
   });
   var fields=['_bucket_rain','_bucket_demand','_bucket_surface','PT_mean','FIPAR','fwet_mean','fSM_mean',
@@ -716,7 +771,7 @@ function bridgeBucketForcing(baseline) {
         ee.Algorithms.If(left.size().gt(0).and(right.size().gt(0)),value,null),f.get(k)));
     });
     return filled.set({precip:ee.Algorithms.If(ee.Algorithms.IsEqual(filled.get('_bucket_rain'),null),null,
-      filled.getNumber('_bucket_rain').multiply(f.getNumber('period_days'))),
+      filled.getNumber('_bucket_rain').multiply(f.getNumber('period_seconds'))),
       bucket_forcing_missing_pct:ee.Algorithms.If(missing,100,0),
       bucket_forcing_status:ee.Algorithms.If(missing,
         ee.Algorithms.If(filled.toDictionary(fields).size().eq(fields.length),'interpolated','unavailable'),'supplied'),
@@ -846,14 +901,14 @@ function assembleForcing(geom, startDate, endDate, config) {
 // SECTION 5 — MODEL CORE
 // ============================================================================
 // The ACCLIM model in three pieces:
-//   computeInitialState  - mean of first 5 timesteps, used to seed running means
+//   computeInitialState  - time-weighted first five days, used to seed running means
 //   acclimStep           - one timestep's update; appends output to history
 //   runACCLIM            - drives ee.List.iterate, returns output FC
 //
 // Running-mean rule (from R script):
 //     x_mean[i] = w[i] * x_mean[i-1] + (1 - w[i]) * x[i]      if PAR >= 10
 //     x_mean[i] = x_mean[i-1]                                  if PAR < 10
-//     x_mean[1] = mean(x[1:5])                                 (initial seed)
+//     x_mean[1] = duration-weighted mean over the initialization window                                 (initial seed)
 // where  dt[i] = days since previous timestep (read from feature property)
 //        w[i]  = exp(-dt[i] / tc)
 //
@@ -872,14 +927,21 @@ function assembleForcing(geom, startDate, endDate, config) {
  * @return {ee.Dictionary} initial state for ee.List.iterate
  */
 function computeInitialState(forcingList, params) {
-  var first5 = ee.FeatureCollection(forcingList.slice(0, 5));
+  var initialSeconds=(params.initialization_days===undefined?5:params.initialization_days)*86400;
+  if(!(initialSeconds>0&&isFinite(initialSeconds)))throw new Error('Initialization window must be positive.');
+  var seedStart=ee.Feature(forcingList.get(0)).getNumber('period_start_millis');
+  var seedEnd=seedStart.add(initialSeconds*1000);
+  var first5=ee.FeatureCollection(forcingList).filter(ee.Filter.lt('period_start_millis',seedEnd)).map(function(f){
+    return f.set('_seed_seconds',f.getNumber('period_end_millis').min(seedEnd)
+      .subtract(f.getNumber('period_start_millis')).max(0).divide(1000));
+  });
 
   // PAR is derived from SWR each day; we need to derive it for the first 5 too
   // so we can seed PARday_mean. We'll compute on the fly here.
   var first5_with_par = first5.map(function(f) {
     var swr = f.getNumber('SWRdaily');
     var dl = f.getNumber('daylength');
-    var par = swr.multiply(2.2).multiply(ee.Number(24).divide(dl));
+    var par=swr.multiply(2.2).multiply(f.getNumber('period_seconds')).divide(f.getNumber('daylight_seconds'));
     var Tmin = f.getNumber('Tmin');
     var Tmax = f.getNumber('Tmax');
     var Tday = Tmax.add(Tmax.add(Tmin).multiply(0.5)).divide(2);
@@ -899,19 +961,23 @@ function computeInitialState(forcingList, params) {
     });
   });
 
+  function seedMean(name) {
+    var weighted=first5_with_par.map(function(f){return f.set('_seed_value',f.getNumber(name).multiply(f.getNumber('_seed_seconds')));});
+    return ee.Number(weighted.aggregate_sum('_seed_value')).divide(ee.Number(weighted.aggregate_sum('_seed_seconds')));
+  }
   // Pmean in R is stored in Pa (1000 * Pdaily where Pdaily is kPa)
-  var Pmean0      = first5_with_par.aggregate_mean('Pdaily').multiply(1000);
-  var ca_mean0    = first5_with_par.aggregate_mean('ca_daily');
-  var Tday_mean0  = first5_with_par.aggregate_mean('Tday');
-  var Tmin_mean0  = first5_with_par.aggregate_mean('Tmin');
-  var Tmax_mean0  = first5_with_par.aggregate_mean('Tmax');
-  var esTday_mean0 = first5_with_par.aggregate_mean('esTday');
-  var esTmax_mean0 = first5_with_par.aggregate_mean('esTmax');
-  var VPDday_mean0 = first5_with_par.aggregate_mean('VPDday');
-  var VPDmax_mean0 = first5_with_par.aggregate_mean('VPDmax');
-  var PARday_mean0 = first5_with_par.aggregate_mean('PARday');
-  var Rnday_mean0  = first5_with_par.aggregate_mean('Rnday');
-  var RHmin_mean0  = first5_with_par.aggregate_mean('RHmin');
+  var Pmean0      = seedMean('Pdaily').multiply(1000);
+  var ca_mean0    = seedMean('ca_daily');
+  var Tday_mean0  = seedMean('Tday');
+  var Tmin_mean0  = seedMean('Tmin');
+  var Tmax_mean0  = seedMean('Tmax');
+  var esTday_mean0 = seedMean('esTday');
+  var esTmax_mean0 = seedMean('esTmax');
+  var VPDday_mean0 = seedMean('VPDday');
+  var VPDmax_mean0 = seedMean('VPDmax');
+  var PARday_mean0 = seedMean('PARday');
+  var Rnday_mean0  = seedMean('Rnday');
+  var RHmin_mean0  = seedMean('RHmin');
 
   return ee.Dictionary({
     // running means (carry across iterations)
@@ -1215,7 +1281,7 @@ function acclimStep(currentFeat, prevState, params) {
     var VPDday = esTday.subtract(humidityPressure).max(0);
 
   // PARday (umol/m2/s) = 2.2 * SWR(W/m2) * (24/dl)
-  var PARday = SWRdaily.multiply(2.2).multiply(ee.Number(24).divide(dl));
+  var PARday=SWRdaily.multiply(2.2).multiply(f.getNumber('period_seconds')).divide(f.getNumber('daylight_seconds'));
 
   // Use source-specific daytime energy prepared in assembleForcing.
   var Rnday = f.getNumber('Rnday');
@@ -1223,21 +1289,11 @@ function acclimStep(currentFeat, prevState, params) {
   // RHmin (fraction)
   var RHmin = humidityPressure.divide(esTmax).max(0).min(1);
 
-  // dt and w. dt is supplied by the forcing FC (days since previous timestep),
-  // so the model is cadence-agnostic — daily, 16-day, monthly all work.
-  // When PARday < 10 (low-light timestep) we carry forward the previous dt
-  // to keep w consistent with the running-mean carry-forward rule.
-  var step = ee.Number(state.get('step'));
-  var isFirst = step.eq(0);
-  var lowLight = PARday.lt(10);
-  var dt_supplied = f.getNumber('dt');
-  var dt_prev = ee.Number(state.get('dt'));
-  var dt = ee.Number(ee.Algorithms.If(
-    isFirst, dt_supplied,
-    ee.Algorithms.If(lowLight, dt_prev, dt_supplied)
-  ));
-  var w = dt.multiply(-1).divide(p.tc).exp();
-  var w_sm = dt.multiply(-1).divide(p.tc_sm).exp();
+  // Acclimation always uses elapsed seconds. Low light holds the state, not time.
+  var step=ee.Number(state.get('step')),isFirst=step.eq(0),lowLight=PARday.lt(10);
+  var elapsedSeconds=f.getNumber('elapsed_seconds'),dt=elapsedSeconds.divide(86400);
+  var w=elapsedSeconds.multiply(-1).divide(ee.Number(p.tc).multiply(86400)).exp();
+  var w_sm=elapsedSeconds.multiply(-1).divide(ee.Number(p.tc_sm).multiply(86400)).exp();
 
   // Running-mean update closure
   function updateMean(prevKey, todayVal, weight) {
@@ -1297,14 +1353,18 @@ function acclimStep(currentFeat, prevState, params) {
     esTmin: esTmin, esTmax: esTmax, esTday: esTday,
     VPDmax: VPDmax, VPDday: VPDday, PARday: PARday, Rnday: Rnday, RHmin: RHmin,
     RHmax: humidityPressure.divide(esTmin).max(0).min(1), VPDmin: esTmin.subtract(humidityPressure).max(0),
-    dt: dt, w: w, w_sm: w_sm, tc: p.tc, tc_sm: p.tc_sm
+    dt: dt, w: w, w_sm: w_sm, tc: p.tc, tc_sm: p.tc_sm,
+    initialization_seconds:ee.Number(p.initialization_days===undefined?5:p.initialization_days).multiply(86400)
   }).combine(runningNow).combine(diag);
 
   // Daytime mean flux integrated over daylight, zero GPP at night.
   // 12 g C/mol (not 44 g CO2/mol); no extra mean-to-maximum adjustment.
-  var GPPdaily = ee.Number(diag.get('PredGPPmean')).multiply(dl).multiply(3600).multiply(12e-6);
+  var GPPperiod=ee.Number(diag.get('PredGPPmean')).multiply(f.getNumber('daylight_seconds')).multiply(12e-6);
+  var GPPdaily=GPPperiod.multiply(86400).divide(f.getNumber('period_seconds'));
   outProps = outProps.combine(ee.Dictionary({
-    GPPdaily: GPPdaily, NPPdaily: GPPdaily.multiply(p.CUEplant), CUEplant: p.CUEplant
+    GPPdaily: GPPdaily, NPPdaily: GPPdaily.multiply(p.CUEplant), CUEplant: p.CUEplant,
+    GPP_period_gC_m2:GPPperiod,NPP_period_gC_m2:GPPperiod.multiply(p.CUEplant),
+    carbon_integration:'daytime mean flux multiplied by daylight seconds'
   }));
   var outFeat = ee.Feature(f.geometry(), f.toDictionary().combine(outProps, true));
 
@@ -1378,11 +1438,12 @@ function soilBucketTrajectory(rows, capacity, keepHistory) {
     var sm = ee.Number(st.get('SM'));
     var pr = r.getNumber('precip'); // mm over this entire calendar month
     var days = r.getNumber('period_days');
-    var conversion = r.getNumber('daylength').multiply(3600).multiply(days).divide(2450000);
+    var seconds=r.getNumber('period_seconds');
+    var conversion=r.getNumber('daylight_seconds').divide(2450000);
     var wet = r.getNumber('fwet_mean');
     var potential = r.getNumber('PT_mean').multiply(ee.Number(1).subtract(r.getNumber('FIPAR')));
     var surfaceLE = r.getNumber('_bucket_surface');
-    var potentialMM = r.getNumber('_bucket_demand').multiply(days);
+    var potentialMM = r.getNumber('_bucket_demand').multiply(seconds);
     var period = soilBucketPeriod(sm, capacity, pr, potentialMM);
     var fraction = ee.Number(period.get('fraction'));
     var soilMM = ee.Number(period.get('evaporation'));
@@ -1393,7 +1454,7 @@ function soilBucketTrajectory(rows, capacity, keepHistory) {
     var error = totalLE.subtract(r.getNumber('PredLEsday_mean'));
     // Weight monthly mean flux errors by represented days; no fitting on
     // condensation/zero-energy periods, though their precipitation updates SM.
-    var weight = ee.Number(ee.Algorithms.If(potential.gt(0).and(r.getNumber('bucket_fit_observed').eq(1)), days, 0));
+    var weight = ee.Number(ee.Algorithms.If(potential.gt(0).and(r.getNumber('bucket_fit_observed').eq(1)), seconds, 0));
     var out = r.set({SM: sm, SM_mean: period.get('meanSM'), SM_end: nextSM, SMmax: capacity,
       fSM_start: sm.divide(capacity),
       SM_units: 'mm effective evaporative storage', fSM_mean: fraction,
@@ -1417,7 +1478,7 @@ function fitSoilBucket(baseline, options) {
   if (!(cfg.minimum > 0 && cfg.maximum > cfg.minimum && cfg.initial >= cfg.minimum &&
         cfg.initial <= cfg.maximum && cfg.gridSize >= 3 && cfg.gridSize % 1 === 0))
     throw new Error('Invalid soil bucket capacity search settings.');
-  baseline = bridgeBucketForcing(baseline.sort('millis'));
+  baseline = bridgeBucketForcing(baseline.map(withPeriodTiming).sort('millis'));
   var checked = baseline.map(function(f) {
     var required = ['precip', 'period_days', 'daylength', 'fwet_mean', 'PT_mean',
       'FIPAR', 'fSM_mean', 'PredLEsday_mean', 'PredLEday_mean', 'PredLEcday_mean', 'PredLEiday_mean', '_bucket_demand', '_bucket_surface'];
@@ -1426,7 +1487,7 @@ function fitSoilBucket(baseline, options) {
     var d = ee.Dictionary.fromLists(required, ee.List.repeat(-9999, required.length))
       .combine(f.toDictionary(required));
     var valid = complete.and(ee.Number(d.get('precip')).gte(0))
-      .and(ee.Number(d.get('period_days')).gte(1)).and(ee.Number(d.get('period_days')).lte(31))
+      .and(ee.Number(d.get('period_days')).gt(0))
       .and(ee.Number(d.get('daylength')).gt(0)).and(ee.Number(d.get('daylength')).lte(24))
       .and(ee.Number(d.get('fwet_mean')).gte(0)).and(ee.Number(d.get('fwet_mean')).lte(1))
       .and(ee.Number(d.get('FIPAR')).gte(0)).and(ee.Number(d.get('FIPAR')).lte(1))
@@ -1439,12 +1500,12 @@ function fitSoilBucket(baseline, options) {
   var lastRow = ee.Feature(ee.Algorithms.If(n,validRows.sort('millis',false).first(),ee.Feature(null,{millis:0,period_days:0})));
   var last = ee.Date(lastRow.get('millis')).advance(lastRow.getNumber('period_days'),'day');
   var duration = ee.Number(validRows.aggregate_sum('period_days'));
-  var contiguous = last.difference(first, 'day').round().eq(duration);
+  var contiguous=last.difference(first,'second').subtract(duration.multiply(86400)).abs().lt(1e-6);
   var eligible = duration.gte(365).and(contiguous);
-  var missingDays = baseline.map(function(f){return f.set('_missing_days',f.getNumber('period_days').multiply(f.getNumber('bucket_forcing_missing_pct')).divide(100));}).aggregate_sum('_missing_days');
-  var missingPct = ee.Number(missingDays).divide(ee.Number(baseline.aggregate_sum('period_days')).max(1)).multiply(100);
+  var missingDays = baseline.map(function(f){return f.set('_missing_days',f.getNumber('period_seconds').multiply(f.getNumber('bucket_forcing_missing_pct')).divide(100));}).aggregate_sum('_missing_days');
+  var missingPct = ee.Number(missingDays).divide(ee.Number(baseline.aggregate_sum('period_seconds')).max(1e-9)).multiply(100);
   var rows = validRows.toList(validRows.size());
-  var scoringRows=validRows.select(['precip','period_days','daylength','fwet_mean','PT_mean','FIPAR','PredLEsday_mean','_bucket_surface','_bucket_demand','bucket_fit_observed']).toList(validRows.size());
+  var scoringRows=validRows.select(['precip','period_days','period_seconds','daylight_seconds','daylength','fwet_mean','PT_mean','FIPAR','PredLEsday_mean','_bucket_surface','_bucket_demand','bucket_fit_observed']).toList(validRows.size());
   function score(cap) {
     cap = ee.Number(cap);
     var trajectory = soilBucketTrajectory(scoringRows, cap, false);
@@ -1517,7 +1578,7 @@ function fitSoilBucket(baseline, options) {
 function fitETBucket(nearSurface, options) {
   nearSurface = nearSurface.sort('millis');
   var proxy = nearSurface.map(function(f) {
-    var properties = f.toDictionary(['date', 'millis', 'precip', 'period_days',
+    var properties = f.toDictionary(['date', 'millis', 'precip', 'period_days','period_seconds','daylight_seconds',
       'daylength', 'fwet_mean', 'PT_mean', 'fSM_mean','model_valid','bucket_forcing_missing_pct','bucket_fit_observed']);
     return ee.Feature(null, properties.combine(ee.Dictionary({FIPAR: 0,
       PredLEsday_mean: f.get('PredLEday_RHVPD'),
@@ -1744,6 +1805,7 @@ function applySharedFPAR(f, p) {
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
+  forcingFC=forcingFC.map(withPeriodTiming);
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR') throw new Error('Unknown FAPAR method.');
@@ -1761,8 +1823,9 @@ function runACCLIM(forcingFC, params) {
   var forcingList = ee.List.sequence(0,ordered.size().subtract(1)).map(function(i) {
     i=ee.Number(i);var f=ee.Feature(ordered.get(i));
     var previous=ee.Feature(ordered.get(i.subtract(1).max(0)));
-    return f.set('dt',ee.Algorithms.If(i.eq(0),f.get('period_days'),
-      f.getNumber('millis').subtract(previous.getNumber('millis')).divide(86400000)));
+    var elapsed=ee.Number(ee.Algorithms.If(i.eq(0),f.get('period_seconds'),
+      f.getNumber('period_end_millis').subtract(previous.getNumber('period_end_millis')).divide(1000)));
+    return f.set({dt:elapsed.divide(86400),elapsed_seconds:elapsed});
   });
   var initial = computeInitialState(forcingList, p);
   var finalState = ee.Dictionary(forcingList.iterate(function(curr, prev) {
@@ -1788,7 +1851,7 @@ function finishACCLIM(baseline, params) {
     // Bucket interpolation must never manufacture carbon or other physiology.
     var keep=f.propertyNames().filter(ee.Filter.stringStartsWith('item','SM'))
       .cat(f.propertyNames().filter(ee.Filter.stringStartsWith('item','bucket_')))
-      .cat(['date','millis','period_days','daylength','model_cadence','model_valid','weather_source',
+      .cat(['date','millis','period_days','daylength','period_seconds','daylight_seconds','period_start_millis','period_end_millis','period_end_exclusive','elapsed_seconds','model_cadence','model_valid','weather_source',
         'weather_missing_pct','weather_dataset','weather_scale_m','weather_source_missing_pct','weather_gapfill_provenance',
         'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_status',
         'satellite_date_basis','satellite_gap_days','satellite_left_date','satellite_right_date','satellite_max_gap_days',
@@ -1812,7 +1875,8 @@ function finishACCLIM(baseline, params) {
     } else { f = f.set({FAPAR_method: p.faparMethod, FAPAR_fit_status: 'not requested'}); }
     f = addPotentialFluxDiagnostics(f, p);
     f = addTemperatureDiagnostics(f, p);
-    var factor = f.getNumber('daylength').multiply(3600).divide(2450000);
+    var periodFactor=f.getNumber('daylight_seconds').divide(2450000);
+    var factor=periodFactor.multiply(86400).divide(f.getNumber('period_seconds'));
     // LE / (J/kg * kg/mol) gives mol H2O/m2/s; express carbon uptake in mmol.
     var transpirationMol = f.getNumber('PredLEcday_mean').divide(2450000 * 0.018);
     var netCarbonMmol = f.getNumber('PredGPPmean').multiply(0.9).divide(1000);
@@ -1823,6 +1887,10 @@ function finishACCLIM(baseline, params) {
       Tair: f.get('Tdaily'), Tair_F: f.getNumber('Tdaily').multiply(1.8).add(32),
       VPD_kPa: f.get('VPDday_mean'), WUE: wue,
       transpiration_mol_m2_s: transpirationMol, WUE_units: 'mmol CO2/mol H2O',
+      ET_period_mm:f.getNumber('PredLEday_mean').multiply(periodFactor),
+      T_period_mm:f.getNumber('PredLEcday_mean').multiply(periodFactor),
+      E_period_mm:f.getNumber('PredLEsday_mean').multiply(periodFactor),
+      I_period_mm:f.getNumber('PredLEiday_mean').multiply(periodFactor),
       ET_mm_day: f.getNumber('PredLEday_mean').multiply(factor),
       T_mm_day: f.getNumber('PredLEcday_mean').multiply(factor),
       E_mm_day: f.getNumber('PredLEsday_mean').multiply(factor),
@@ -2199,7 +2267,11 @@ function aggregateModelMonths(rows) {
     });
     result.date=k+'-01';result.millis=carbonDateMillis(result.date);result['system:time_start']=result.millis;
     result.year=Number(k.slice(0,4));result.month=Number(k.slice(5));
-    result.period_days=list.length;result.model_cadence='daily';result.output_cadence='monthly';
+    result.period_seconds=list.reduce(function(a,r){return a+nativePeriodSeconds(r);},0);
+    result.daylight_seconds=list.reduce(function(a,r){return a+nativeDaylightSeconds(r);},0);
+    result.period_days=result.period_seconds/86400;
+    result.period_start_millis=carbonDateMillis(list[0].date);result.period_end_millis=result.period_start_millis+result.period_seconds*1000;
+    result.model_cadence='daily';result.output_cadence='monthly';
     result.aggregation='daily simulation; daytime flux means weighted by daylight duration';
     result.valid_model_days=list.filter(function(r){return carbonFinite(r.PredGPPmean);}).length;
     result.model_missing_pct=100*(1-result.valid_model_days/list.length);
@@ -2210,6 +2282,10 @@ function aggregateModelMonths(rows) {
       var name=f==='precip'?'precip':f.replace('daily','_period_gC_m2');
       result[name]=valid.length===list.length?sum:null;
       result[name+'_available_sum']=valid.length?sum:null;
+    });
+    ['ET_period_mm','T_period_mm','E_period_mm','I_period_mm'].forEach(function(f){
+      var valid=list.filter(function(r){return carbonFinite(r[f]);});
+      result[f]=valid.length===list.length?valid.reduce(function(a,r){return a+r[f];},0):null;
     });
     result.precip_units='mm/represented period';
     return result;
@@ -2251,8 +2327,10 @@ function nativeBucketBridge(input) {
   var rows=input.map(function(r) {
     var f=mergeParams(r,{}),valid=['PT_mean','FIPAR','fwet_mean','daylength'].every(function(k){return carbonFinite(f[k]);});
     var demand=f.PT_mean*(1-f.FIPAR);
-    f._bucket_rain=carbonFinite(f.precip)?f.precip/f.period_days:null;
-    f._bucket_demand=valid?Math.max(0,demand)*(1-f.fwet_mean)*f.daylength*3600/2450000:null;
+    f.period_seconds=nativePeriodSeconds(f);f.period_days=f.period_seconds/86400;
+    f.daylight_seconds=nativeDaylightSeconds(f);
+    f._bucket_rain=carbonFinite(f.precip)?f.precip/f.period_seconds:null;
+    f._bucket_demand=valid?Math.max(0,demand)*(1-f.fwet_mean)*f.daylight_seconds/f.period_seconds/2450000:null;
     f._bucket_surface=valid?demand*f.fwet_mean:null;
     f.bucket_forcing_missing_pct=f.bucket_forcing_missing_pct>0||fields.some(function(k){return !carbonFinite(f[k]);})?100:0;
     return f;
@@ -2267,7 +2345,7 @@ function nativeBucketBridge(input) {
     });
   });
   rows.forEach(function(r) {
-    r.precip=carbonFinite(r._bucket_rain)?r._bucket_rain*r.period_days:null;
+    r.precip=carbonFinite(r._bucket_rain)?r._bucket_rain*r.period_seconds:null;
     r.bucket_fit_observed=r.bucket_forcing_missing_pct?0:1;
     r.bucket_forcing_status=!r.bucket_forcing_missing_pct?'supplied':fields.every(function(k){return carbonFinite(r[k]);})?'interpolated':'unavailable';
   });
@@ -2276,10 +2354,10 @@ function nativeBucketBridge(input) {
 function nativeBucketTrajectory(rows,capacity,history) {
   var sm=capacity,sse=0,weight=0,out=[];
   rows.forEach(function(r) {
-    var conversion=r.daylength*3600*r.period_days/2450000;
-    var p=nativeBucketPeriod(sm,capacity,r.precip,r._bucket_demand*r.period_days);
+    var conversion=r.daylight_seconds/2450000;
+    var p=nativeBucketPeriod(sm,capacity,r.precip,r._bucket_demand*r.period_seconds);
     var soilLE=p.evaporation/conversion,totalLE=r._bucket_surface+soilLE;
-    var w=r.PT_mean*(1-r.FIPAR)>0 && r.bucket_fit_observed===1?r.period_days:0;
+    var w=r.PT_mean*(1-r.FIPAR)>0 && r.bucket_fit_observed===1?r.period_seconds:0;
     sse+=Math.pow(totalLE-r.PredLEsday_mean,2)*w;weight+=w;
     if(history)out.push(mergeParams(r,{SM:sm,SM_mean:p.meanSM,SM_end:p.endSM,SMmax:capacity,
       fSM_start:sm/capacity,SM_units:'mm effective evaporative storage',fSM_mean:p.fraction,
@@ -2298,9 +2376,9 @@ function nativeFitBucket(input,options) {
   if(!(cfg.minimum>0&&cfg.maximum>cfg.minimum&&cfg.initial>=cfg.minimum&&cfg.initial<=cfg.maximum&&cfg.gridSize>=3&&cfg.gridSize%1===0))throw new Error('Invalid bucket capacity settings.');
   var rows=nativeBucketBridge(input),required=['precip','period_days','daylength','fwet_mean','PT_mean','FIPAR','fSM_mean',
     'PredLEsday_mean','PredLEday_mean','PredLEcday_mean','PredLEiday_mean','_bucket_demand','_bucket_surface'];
-  function valid(r){return required.every(function(k){return carbonFinite(r[k]);})&&r.precip>=0&&r.period_days>=1&&r.period_days<=31&&r.daylength>0&&r.daylength<=24&&r.fwet_mean>=0&&r.fwet_mean<=1&&r.FIPAR>=0&&r.FIPAR<=1&&r.fSM_mean>=0&&r.fSM_mean<=1;}
+  function valid(r){return required.every(function(k){return carbonFinite(r[k]);})&&r.precip>=0&&r.period_seconds>0&&r.daylight_seconds>0&&r.daylight_seconds<=r.period_seconds&&r.daylength>0&&r.daylength<=24&&r.fwet_mean>=0&&r.fwet_mean<=1&&r.FIPAR>=0&&r.FIPAR<=1&&r.fSM_mean>=0&&r.fSM_mean<=1;}
   var fitRows=rows.filter(valid),duration=fitRows.reduce(function(a,r){return a+r.period_days;},0);
-  var eligible=fitRows.length&&duration>=365&&Math.round((fitRows[fitRows.length-1].millis-fitRows[0].millis)/86400000+fitRows[fitRows.length-1].period_days)===duration;
+  var eligible=fitRows.length&&duration>=365&&Math.abs((fitRows[fitRows.length-1].millis-fitRows[0].millis)/1000+fitRows[fitRows.length-1].period_seconds-duration*86400)<1e-6;
   var best={capacity:cfg.initial,mse:0},spread=0,informative=false,apply=false,allFull=false;
   function score(cap){return {capacity:cap,mse:nativeBucketTrajectory(fitRows,cap,false).mse};}
   if(eligible) {
@@ -2314,7 +2392,7 @@ function nativeFitBucket(input,options) {
       best=challenger;step/=4;
     }
     informative=spread>1e-8&&nativeBucketTrajectory(fitRows,best.capacity,false).weight>0;
-    allFull=fitRows.every(function(r){return r.precip>=Math.max(0,r.PT_mean*(1-r.FIPAR))*(1-r.fwet_mean)*r.daylength*3600*r.period_days/2450000;});
+    allFull=fitRows.every(function(r){return r.precip>=Math.max(0,r.PT_mean*(1-r.FIPAR))*(1-r.fwet_mean)*r.daylight_seconds/2450000;});
     apply=informative&&!allFull;
   }
   var boundary=best.capacity<=cfg.minimum*1.001||best.capacity>=cfg.maximum/1.001;
@@ -2326,15 +2404,15 @@ function nativeFitBucket(input,options) {
       f.fSM_mean=1;f.fSM_start=1;f.PredLEsday_mean=full;f.PredLEday_mean=full+r.PredLEcday_mean+r.PredLEiday_mean;}
     return f;
   });
-  var totalDays=rows.reduce(function(a,r){return a+r.period_days;},0);
-  var missing=rows.reduce(function(a,r){return a+r.period_days*r.bucket_forcing_missing_pct;},0)/Math.max(1,totalDays);
+  var totalSeconds=rows.reduce(function(a,r){return a+r.period_seconds;},0);
+  var missing=rows.reduce(function(a,r){return a+r.period_seconds*r.bucket_forcing_missing_pct;},0)/Math.max(1e-9,totalSeconds);
   return fitted.concat(rows.filter(function(r){return !valid(r);})).sort(function(a,b){return a.millis-b.millis;}).map(function(r){return mergeParams(r,{
     SM_fit_status:status,SM_fit_RMSE:apply?Math.sqrt(best.mse):null,SM_initial_guess:cfg.initial,SM_search_min:cfg.minimum,SM_search_max:cfg.maximum,
     SM_initialization:'full at first bracketed forcing; no spin-up',precip_units:'mm/period',bucket_record_missing_pct:missing});});
 }
 function fitNativeBuckets(input,params) {
   var p=mergeParams(ACCLIM_PARAMS,params||{}),near=nativeFitBucket(input,p.soilBucket);
-  var proxy=near.map(function(r){var f={};['date','millis','precip','period_days','daylength','fwet_mean','PT_mean','fSM_mean','model_valid','bucket_forcing_missing_pct','bucket_fit_observed'].forEach(function(k){f[k]=r[k];});
+  var proxy=near.map(function(r){var f={};['date','millis','precip','period_days','period_seconds','daylight_seconds','daylength','fwet_mean','PT_mean','fSM_mean','model_valid','bucket_forcing_missing_pct','bucket_fit_observed'].forEach(function(k){f[k]=r[k];});
     return mergeParams(f,{FIPAR:0,PredLEsday_mean:r.PredLEday_RHVPD,PredLEday_mean:r.PredLEday_RHVPD,PredLEcday_mean:0,PredLEiday_mean:0});});
   var et=nativeFitBucket(proxy,p.etBucket);
   return near.map(function(r,i){var e=et[i],hasFit=carbonFinite(e.SMmax),full=e.SM_fit_status==='unconstrained_full_bucket';
@@ -2362,35 +2440,14 @@ function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overri
   // Unlike RAP's scaled integer images, these values are already g C/m2.
   // g C -> kg C -> lb C, using the same conversion constants as RAP.
   var conversion = 0.001 * CARBON_UNITS.poundsPerKilogram * CARBON_UNITS.squareMetresPerAcre;
-  var monthly = {}, annual = {}, allocations = {};
-  var nativeDaily = monthlyRows.length && monthlyRows[0].model_cadence === 'daily';
-  annualRows.forEach(function(r) { annual[r.year] = r; });
-  monthlyRows.forEach(function(r) {
-    var ms = carbonDateMillis(r.date), key = nativeDaily ? r.date : carbonMonthKey(ms);
-    if (monthly.hasOwnProperty(key)) throw new Error('Duplicate model month: ' + r.date);
-    var d = new Date(ms);
-    var valid = carbonFinite(r.PredGPPmean) && r.PredGPPmean >= 0 &&
-      carbonFinite(r.daylength) && r.daylength >= 0 && r.daylength <= 24;
-    monthly[key] = { weather_source:r.weather_source || 'gridded', anchor: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 16),
-      gpp: valid ? r.PredGPPmean * r.daylength * 3600 * CARBON_UNITS.gramsCPerMol / 1e6 : null };
-  });
+  var annual={},allocations={};
+  annualRows.forEach(function(r){annual[r.year]=r;});
+  var byDay=periodCarbonByDay(monthlyRows,start,end);
   var daily = [], windows = {}, periods = [];
-  for (var ms = start; ms <= end; ms += dayMs) {
-    var date = new Date(ms), year = date.getUTCFullYear(), key = carbonMonthKey(ms);
-    var current = monthly[nativeDaily ? carbonDateString(ms) : key], gpp = null, mode = nativeDaily ? 'missing_day' : 'missing_month';
-    if (nativeDaily && current && carbonFinite(current.gpp)) { gpp=current.gpp; mode='native_daily'; }
-    if (!nativeDaily && current && carbonFinite(current.gpp)) {
-      var left = ms < current.anchor ? monthly[key - 1] : current;
-      var right = ms < current.anchor ? current : monthly[key + 1];
-      if (left && right && carbonFinite(left.gpp) && carbonFinite(right.gpp)) {
-        var weight = (ms - left.anchor) / (right.anchor - left.anchor);
-        gpp = left.gpp + weight * (right.gpp - left.gpp);
-        mode = 'linear_monthly';
-      } else {
-        gpp = current.gpp;
-        mode = 'held_within_month';
-      }
-    }
+  for (var ms=start;ms<=end;ms+=dayMs) {
+    var date=new Date(ms),year=date.getUTCFullYear();
+    var current=byDay[carbonDateString(ms)],gpp=current?current.gpp:null;
+    var mode=current?current.mode:'missing_weather_period';
     if (!allocations[year]) allocations[year] = carbonAllocation(annual[year], p);
     var a = allocations[year];
     var npp = carbonFinite(gpp) ? gpp * p.CUEplant : null;
@@ -2424,7 +2481,7 @@ function buildCarbonProducts(monthlyRows, annualRows, startDate, endDate, overri
     }
     var w = windows[windowKey];
     w.requested++;
-    if (mode === 'held_within_month') w.held++;
+    if (mode === 'allocated_from_weather_period') w.held++;
     if (carbonFinite(npp)) { w.valid++; w.gpp += gpp; w.npp += npp; }
     if (carbonFinite(biomass)) { w.biomassValid++; w.biomass += biomass; }
   }

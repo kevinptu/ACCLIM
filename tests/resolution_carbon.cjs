@@ -3,6 +3,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  const s=fs.readFileSync(file,'utf8'),ctx={};vm.createContext(ctx);
  vm.runInContext(s.match(/var ACCLIM_PARAMS = \{[\s\S]*?\n\};/)[0]+'\n'+
  s.slice(s.indexOf('function mergeParams('),s.indexOf('// SECTION 6'))+'\n'+
+ s.slice(s.indexOf('function nativePeriodSeconds('),s.indexOf('function sourceCalendar('))+'\n'+
  s.slice(s.indexOf('var CARBON_UNITS ='),s.indexOf('/** Annual RAP')),ctx);
  const climate=[{year:2024,MAT:10,temperatureMonths:12,AFG:20,PFG:40,SHR:20,TRE:20}];
  const rows=Array.from({length:29},(_,i)=>({date:'2024-02-'+String(i+1).padStart(2,'0'),
@@ -22,7 +23,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  assert(sum.GPP_gC_m2_available_sum>0);assert(Math.abs(sum.GPPdaily_missing_pct-100/29)<1e-10);
  const partial=ctx.carbonSummaryRows(p.daily.slice(0,10),false)[0];assert.equal(partial.GPP_gC_m2,null);assert.equal(partial.requested_days,10);
  const monthly=ctx.buildCarbonProducts([{date:'2024-02-01',PredGPPmean:10,daylength:12}],climate,'2024-02-01','2024-02-29');
- assert(monthly.daily.every(r=>r.interpolation==='held_within_month'));
+ assert(monthly.daily.every(r=>r.interpolation==='allocated_from_weather_period'));
  assert(Math.abs(monthly.daily[0].GPPdaily-5.184)<1e-10);
 }
 console.log('PASS native daily carbon, leap-year totals, daylight-weighted monthly means, missing/partial coverage, and retained monthly mode');

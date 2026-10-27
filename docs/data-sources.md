@@ -34,9 +34,9 @@ Monthly TerraClimate inputs use means of the aligned daily satellite series. A m
 
 ## Bucket-only gap filling
 
-Bucket precipitation is normalized to mm/day before interpolation, then converted back to a period total. Potential evaporative demand is interpolated in mm/day; surface-water evaporation and supporting bucket fields are interpolated separately. Existing supplied values always take precedence. Only two-sided interpolation is used; unresolved leading/trailing gaps remain unavailable.
+Bucket precipitation is normalized to mm/second before interpolation, then converted back to a period total. Potential evaporative demand is interpolated in mm/second; surface-water evaporation and supporting bucket fields are interpolated separately. Existing supplied values always take precedence. Only two-sided interpolation is used; unresolved leading/trailing gaps remain unavailable.
 
-The bucket continues through interpolated periods without resetting storage. Interpolated periods update storage but are excluded from the capacity-fitting objective. Capacity fitting retains the existing day-weighted objective and full initial bucket, with at least 365 contiguous represented days. The separate ET-effective bucket remains a diagnostic fitted to the original humidity-constrained ET reference.
+The bucket continues through interpolated periods without resetting storage. Interpolated periods update storage but are excluded from the capacity-fitting objective. Capacity fitting retains the duration-weighted objective (seconds) and full initial bucket, with at least 365 contiguous represented days. The separate ET-effective bucket remains a diagnostic fitted to the original humidity-constrained ET reference.
 
 Interpolated bucket inputs do not create GPP, NPP, temperatures, or other physiological model outputs for missing forcing periods. Acclimation advances by elapsed time between usable physiological periods. Tower weather remains monthly and never substitutes gridded weather; valid supplied precipitation can still support a bucket even when another tower weather field is unavailable.
 
@@ -52,7 +52,7 @@ Interpolated bucket inputs do not create GPP, NPP, temperatures, or other physio
 * `bucket_record_missing_pct`: period-duration-weighted percentage of the complete requested record with missing bucket forcing before interpolation.
 * `bucket_forcing_status`: supplied, interpolated, or unavailable. Supplied includes the source product's own gap-filled values.
 
-Native model CSV exports all native model periods and their diagnostics. Daily CSV combines native daily model diagnostics and carbon products for daily weather; for monthly weather it retains the explicitly labeled monthly-to-daily carbon interpolation. Monthly model charts/CSV use daylight-duration-weighted daytime flux means for daily runs, and sum precipitation over represented days. Monthly and annual carbon CSVs include complete totals, separately labeled available-period sums, requested days, missing percentages, and calendar coverage percentages. Missing days never contribute fabricated zero carbon.
+Native model CSV exports all native model periods and their diagnostics. Daily CSV combines native daily model diagnostics and carbon products for daily weather; for monthly weather it allocates native monthly carbon totals uniformly over their represented days, labeled `allocated_from_weather_period`. This preserves monthly mass; it does not reconstruct daily physiology or interpolate between months. Monthly model charts/CSV use daylight-duration-weighted daytime flux means for daily runs, and sum precipitation over represented days. Monthly and annual carbon CSVs include complete totals, separately labeled available-period sums, requested days, missing percentages, and calendar coverage percentages. Missing days never contribute fabricated zero carbon.
 
 Daily GPP mass = mean daytime GPP × daylength × 3600 × 12×10⁻⁶, in gC/m²/day. Monthly and annual carbon totals sum daily masses; NPP retains the configured CUE and cover allocation. No daily physiology is reconstructed from monthly values when a daily weather source is selected.
 
@@ -68,3 +68,18 @@ The interactive app samples satellite data in bounded batches and materializes w
 * [MOD09GQ](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MOD09GQ), [MOD09GA QA](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MOD09GA)
 * [MOD09Q1](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MOD09Q1)
 * [MOD13Q1](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MOD13Q1), [MYD13Q1](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MYD13Q1)
+
+## Shared equations and timestep duration
+
+The weather adapter defines each model interval. All sources use the same physiological and bucket equations; TerraClimate supplies monthly intervals and ERA5-Land/GRIDMET supply daily intervals. Satellite reflectances are aligned using the interpolation rules above.
+
+Each row carries `period_seconds`, `daylight_seconds`, interval start/end timestamps, and `elapsed_seconds`. Daylight seconds sum astronomical daylight across the interval; monthly daylength is the mean across its days. Daytime radiation and PAR are converted using `period_seconds / daylight_seconds`.
+
+* Acclimation weight: `exp(-elapsed_seconds / (tc * 86400))`, with `tc_sm` used for the soil-humidity response. Both time constants remain in days.
+* Carbon mass: daytime GPP in micromol CO2/m2/s times `daylight_seconds * 12e-6`, yielding `GPP_period_gC_m2`; NPP uses the existing CUE.
+* Water mass: daytime LE in W/m2 times `daylight_seconds / 2450000`, yielding mm/period. Equivalent mm/day values divide by `period_seconds / 86400`.
+* Bucket forcing rates are in mm/second and integrated over interval seconds. Fitting weights and missing-data percentages use interval duration.
+
+Initialization uses a fixed five-day window rather than five records. Daily inputs retain the original five-day convention; monthly inputs use the first monthly value over that window. Low-light periods hold the physiological state without holding the elapsed-time clock.
+
+Daily and monthly predictions need not be identical: evaluating nonlinear equations with monthly mean weather differs from aggregating daily evaluations. The shared duration contract removes inconsistent unit conversions, not this aggregation effect. Subdaily weather ingestion is not yet offered in the interface.
