@@ -60,9 +60,9 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  ndvi_min: 0,
+  ndvi_min: -0.10,
   ndvi_max: 1,
-  ndvi_exp: 2
+  ndvi_exp: 2.2
 };
 
 var DATASETS = {
@@ -465,18 +465,20 @@ function griddedDaytimeRn(swrDaily, daylength, tday, ea, albedo, emSurface, p, p
 
 // Dataset adapters. Weather is sampled at its native grid; reflectance at 30/250 m.
 // These settings are research choices, not claims about observed revisit intervals.
+// Product-wide catalog year ranges checked 2026-10-27; final years may be partial.
+// Combined satellites use the union: HLS Landsat from 2013, Sentinel from 2015; MODIS Terra from 2000, Aqua from 2002.
 var WEATHER_SOURCES = {
-  TERRACLIMATE: {label:'TerraClimate (global/4.6km/monthly)', id:'IDAHO_EPSCOR/TERRACLIMATE', daily:false, scale:4638},
-  ERA5: {label:'ERA5-Land (global/11km/daily)', id:'ECMWF/ERA5_LAND/DAILY_AGGR', daily:true, scale:11132},
-  GRIDMET: {label:'GRIDMET (contiguous US/4km/daily)', id:'IDAHO_EPSCOR/GRIDMET', daily:true, scale:4638}
+  TERRACLIMATE: {label:'TerraClimate (global/4.6km/monthly/1958-2024)', id:'IDAHO_EPSCOR/TERRACLIMATE', daily:false, scale:4638},
+  ERA5: {label:'ERA5-Land (global/11km/daily/1950-2026)', id:'ECMWF/ERA5_LAND/DAILY_AGGR', daily:true, scale:11132},
+  GRIDMET: {label:'GRIDMET (contiguous US/4km/daily/1979-2026)', id:'IDAHO_EPSCOR/GRIDMET', daily:true, scale:4638}
 };
 var SATELLITE_SOURCES = {
-  LANDSAT8: {label:'Landsat (global/30m/8-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_8DAY'], days:8, scale:30, gap:32, kind:'landsat'},
-  LANDSAT32: {label:'Landsat (global/30m/32-day)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_32DAY'], days:32, scale:30, gap:64, kind:'landsat'},
-  HLS: {label:'HLS (global/30m/daily)', ids:['NASA/HLS/HLSL30/v002','NASA/HLS/HLSS30/v002'], days:1, scale:30, gap:32, kind:'hls'},
-  MODIS1: {label:'MODIS (global/250m/daily)', ids:['MODIS/061/MOD09GQ','MODIS/061/MYD09GQ'], days:1, scale:250, gap:32, kind:'gq'},
-  MODIS8: {label:'MODIS (global/250m/8-day)', ids:['MODIS/061/MOD09Q1','MODIS/061/MYD09Q1'], days:8, scale:250, gap:32, kind:'q1'},
-  MODIS16: {label:'MODIS (global/250m/16-day)', ids:['MODIS/061/MOD13Q1','MODIS/061/MYD13Q1'], days:16, scale:250, gap:48, kind:'vi'}
+  LANDSAT8: {label:'Landsat (global/30m/8-day/1984-2026)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_8DAY'], days:8, scale:30, gap:32, kind:'landsat'},
+  LANDSAT32: {label:'Landsat (global/30m/32-day/1984-2026)', ids:['LANDSAT/COMPOSITES/C02/T1_L2_32DAY'], days:32, scale:30, gap:64, kind:'landsat'},
+  HLS: {label:'HLS (global/30m/daily/2013-2026)', ids:['NASA/HLS/HLSL30/v002','NASA/HLS/HLSS30/v002'], days:1, scale:30, gap:32, kind:'hls'},
+  MODIS1: {label:'MODIS (global/250m/daily/2000-2026)', ids:['MODIS/061/MOD09GQ','MODIS/061/MYD09GQ'], days:1, scale:250, gap:32, kind:'gq'},
+  MODIS8: {label:'MODIS (global/250m/8-day/2000-2026)', ids:['MODIS/061/MOD09Q1','MODIS/061/MYD09Q1'], days:8, scale:250, gap:32, kind:'q1'},
+  MODIS16: {label:'MODIS (global/250m/16-day/2000-2026)', ids:['MODIS/061/MOD13Q1','MODIS/061/MYD13Q1'], days:16, scale:250, gap:48, kind:'vi'}
 };
 // One temporal contract for every weather adapter. Flux density is kept separate
 // from mass integrated over the represented weather interval.
