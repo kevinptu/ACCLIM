@@ -15,11 +15,12 @@ for(const path of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  assert.equal(c.lstNDVIChartTable(fitRows,'all').rows.length,8);assert.equal(c.lstNDVIFitSeries('all')[12].lineWidth,2);assert.equal(c.lstNDVIFitSeries('all')[0].lineWidth,0);
  const stats=c.lstNDVIStats([0,1,null]);assert.equal(stats.n,2);assert.equal(stats.mean,.5);assert.equal(stats.p05,.05);assert.equal(stats.p95,.95);
  assert.equal(c.lstNDVIStats([]).p05,null);assert.equal(c.lstNDVIStats([.4]).p95,.4);
- const hist=c.lstNDVIHistogram(rows,'all');assert.equal(hist.stats.n,2);assert.equal(hist.table.rows.reduce((n,r)=>n+r.c[1].v,0),2);
- assert.equal(c.lstNDVIHistogram(rows,'2014-01-01').stats.n,1);
- const ends=c.lstNDVIHistogram([{NDVI:-1,LST_C:20},{NDVI:1,LST_C:20}],'all');assert.equal(ends.table.rows[0].c[1].v,1);assert.equal(ends.table.rows[39].c[1].v,1);
+ const reflectanceRows=[{date:'2014-01-01',month:1,NDVI:0,LST_C:20,red:.2,nir:.2},{date:'2014-02-02',month:2,NDVI:.5,LST_C:30,red:.1,nir:.3}];
+ const nr=c.lstNIRRedChartTable(reflectanceRows,'all');assert.equal(nr.rows.length,2);assert.equal(nr.rows[0].c[0].v,.2);assert.equal(nr.rows[0].c[1].v,.2);
+ assert.equal(c.lstNIRRedChartTable(reflectanceRows,'2014-02-02').rows[0].c[1].v,.3);
+ assert(!s.includes('function lstNDVIHistogram'));
  const ts=c.lstNDVITimeTable(rows,2014,'LST_C');assert.equal(ts.rows.length,46);assert.equal(ts.rows[0].c[1].v,20);assert.equal(ts.rows[1].c[1].v,null);
- assert(s.includes('if(replaceHistogram)replaceHistogram(histogram(d))'));
+ assert(s.includes('if(replaceReflectance)replaceReflectance(reflectanceChart(d))'));
  let samples=0,charts=0,note='',disabled=false;
  c.lstNDVIBox=()=>({box:true});c.sampleLSTNDVIPeriods=(g,y,k,m)=>({evaluate:done=>{samples++;done({rows:[{date:y+'-'+String(m).padStart(2,'0')+'-01',month:m,NDVI:.5,LST_C:25,NDVI_valid_fraction:1}],paired_periods:1,reflectance_periods:1,pixels:117,pixel_size_m:926.6});}});
  c.UI={_requestId:1,lstNDVIYear:{getValue:()=> '2014'},lstNDVIBoxKm:{getValue:()=> '10'},runButton:{setDisabled:v=>disabled=v},resultsPanel:{style:()=>({set(){}})},resultsOverlay:{setExpanded(){}},_chartCard:{add(){}}};

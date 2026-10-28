@@ -2935,7 +2935,9 @@ function lstNDVIReflectance(image,projection) {
   var mean=ndvi.reduceResolution({reducer:ee.Reducer.mean(),maxPixels:64}).reproject(projection);
   var fraction=ndvi.mask().unmask(0).reduceResolution({reducer:ee.Reducer.mean(),maxPixels:64})
     .reproject(projection).rename('NDVI_valid_fraction');
-  return mean.addBands(fraction);
+  var reflectance=red.rename('red').addBands(nir.rename('nir')).updateMask(good)
+    .reduceResolution({reducer:ee.Reducer.mean(),maxPixels:64}).reproject(projection);
+  return mean.addBands(fraction).addBands(reflectance);
 }
 function sampleLSTNDVIPeriods(geom,year,boxKm,firstMonth,lastMonth) {
   var box=lstNDVIBox(geom,boxKm),start=ee.Date.fromYMD(year,firstMonth,1);
@@ -3016,13 +3018,13 @@ function lstNDVIStats(values) {
   function quantile(p){var pos=(sorted.length-1)*p,lo=Math.floor(pos),hi=Math.ceil(pos);return sorted[lo]+(sorted[hi]-sorted[lo])*(pos-lo);}
   return {n:sorted.length,mean:sorted.reduce(function(a,b){return a+b;},0)/sorted.length,p05:quantile(.05),p95:quantile(.95)};
 }
-function lstNDVIHistogram(rows,period) {
-  var selected=rows.filter(function(r){return (period==='all'||r.date===period)&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C);});
-  var bins=[];for(var i=0;i<40;i++)bins.push(0);
-  selected.forEach(function(r){var index=Math.max(0,Math.min(39,Math.floor((r.NDVI+1)/.05)));bins[index]++;});
-  return {stats:lstNDVIStats(selected.map(function(r){return r.NDVI;})),table:{cols:[
-    {label:'NDVI bin',type:'string'},{label:'Pixel–interval pairs',type:'number'}],
-    rows:bins.map(function(n,i){var low=-1+i*.05,high=low+.05;return {c:[{v:low.toFixed(2)+' to '+high.toFixed(2)},{v:n}]};})}};
+function lstNIRRedChartTable(rows,period) {
+  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],all=period==='all';
+  var cols=[{label:'Red reflectance',type:'number'}];
+  (all?months:['NIR reflectance']).forEach(function(label){cols.push({label:label,type:'number'});});
+  return {cols:cols,rows:rows.filter(function(r){return (all||r.date===period)&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C)&&carbonFinite(r.red)&&carbonFinite(r.nir);}).map(function(r){
+    var cells=[{v:r.red}];for(var m=1;m<=(all?12:1);m++)cells.push({v:!all||r.month===m?r.nir:null});return {c:cells};
+  })};
 }
 function lstNDVITimeTable(rows,year,field) {
   var groups={};rows.forEach(function(r){if(carbonFinite(r.NDVI)&&carbonFinite(r.LST_C)){if(!groups[r.date])groups[r.date]=[];groups[r.date].push(r[field]);}});
@@ -3061,24 +3063,22 @@ function runLSTNDVI(geom) {
     addResultChart(chart(initial));
     var replace=chartReplacer();
     UI._chartCard.add(ui.Select({items:(annualAllowed?[{label:'All 8-day intervals (colored by month)',value:'all'}]:[]).concat(Object.keys(dates).sort().map(function(d){return {label:d,value:d};})),
-      value:initial,onChange:function(d){replace(chart(d));if(replaceHistogram)replaceHistogram(histogram(d));},style:{stretch:'horizontal'}}));
+      value:initial,onChange:function(d){replace(chart(d));if(replaceReflectance)replaceReflectance(reflectanceChart(d));},style:{stretch:'horizontal'}}));
     if(!annualAllowed)addChartNote(ui.Label('This box has more than 20,000 valid pairs. Select an 8-day interval to view all its pixels, or reduce the box for an annual view. No pairs were subsampled.'));
     var partial=rows.filter(function(r){return r.NDVI_valid_fraction<0.999;}).length;
     addChartNote(ui.Label({value:rows.length+' valid pixel–interval pairs across '+Object.keys(dates).length+' intervals. '+pixelCount+' grid-cell centers in box; native spacing '+pixelSize.toFixed(1)+' m.\n'+
       'NDVI is the area-weighted mean of quality-screened 500 m NDVI, not NDVI of averaged reflectance. '+partial+' pairs have partial NDVI coverage. Clouds, shadows, snow and poor-quality values are excluded; no gap filling.\n'+
       'MYD09A1 selected observations and MYD11A2 8-day means share the composite interval, not necessarily the observation day. LST QA: good quality and reported error ≤1 K. Dates are composite starts.',style:{whiteSpace:'pre-wrap'}}));
-    function histogram(period){
-      var h=lstNDVIHistogram(rows,period),s=h.stats;
-      return ui.Chart(h.table).setChartType('ColumnChart').setOptions({
-        title:'NDVI histogram — '+(period==='all'?settings.year:period)+'\n5th percentile: '+(s.n?s.p05.toFixed(3):'unavailable')+
-          ' | 95th percentile: '+(s.n?s.p95.toFixed(3):'unavailable')+' | n='+s.n,
-        hAxis:{title:'NDVI (bin width 0.05)',slantedText:true,slantedTextAngle:60},
-        vAxis:{title:'Pixel–interval pair count',viewWindow:{min:0}},legend:{position:'none'},
-        colors:['#2E7D32'],bar:{groupWidth:'95%'}});
+    function reflectanceChart(period){
+      return ui.Chart(lstNIRRedChartTable(rows,period)).setChartType('ScatterChart').setOptions({
+        title:'NIR vs red reflectance — '+(period==='all'?settings.year:period),
+        hAxis:{title:'Red surface reflectance (fraction)'},vAxis:{title:'NIR surface reflectance (fraction)'},
+        pointSize:2,lineWidth:0,legend:{position:period==='all'?'bottom':'none'},
+        colors:period==='all'?['#313695','#4575b4','#74add1','#abd9e9','#66bd63','#1a9850','#fee08b','#fdae61','#f46d43','#d73027','#a50026','#762a83']:['#1976D2']});
     }
-    addResultChart(histogram(initial));
-    var replaceHistogram=chartReplacer();
-    addChartNote(ui.Label('Histogram and percentiles follow the scatter interval selector. Each valid pixel–interval pair has equal weight; values are the 1 km means used in the scatter.'));
+    addResultChart(reflectanceChart(initial));
+    var replaceReflectance=chartReplacer();
+    addChartNote(ui.Label('NIR versus red uses the same valid pixel–interval pairs and follows the LST–NDVI interval selector. Both reflectance bands are area-averaged over the same quality-screened 500 m subpixels within each LST cell.'));
     [{field:'NDVI',name:'NDVI',units:'NDVI',color:'#2E7D32'},
       {field:'LST_C',name:'Daytime LST',units:'Daytime LST (°C)',color:'#D84315'}].forEach(function(spec){
       addResultChart(ui.Chart(lstNDVITimeTable(rows,settings.year,spec.field)).setChartType('LineChart').setOptions({
