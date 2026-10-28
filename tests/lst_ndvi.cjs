@@ -5,7 +5,14 @@ for(const path of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  vm.runInContext(s.slice(s.indexOf('function lstNDVISettings('),s.indexOf('var UI =')),c);
  assert.equal(c.lstNDVISettings('2014','10').boxKm,10);assert.throws(()=>c.lstNDVISettings('0020','10'));assert.throws(()=>c.lstNDVISettings('2014','0'));assert.throws(()=>c.lstNDVISettings('2014','Infinity'));
  const rows=[{date:'2014-01-01',month:1,NDVI:0,LST_C:20},{date:'2014-02-02',month:2,NDVI:.5,LST_C:30},{date:'2014-01-01',month:1,NDVI:null,LST_C:20}];
- assert.equal(c.lstNDVIChartTable(rows,'all').rows.length,2);assert.equal(c.lstNDVIChartTable(rows,'all').cols.length,13);assert.equal(c.lstNDVIChartTable(rows,'2014-01-01').rows[0].c[0].v,0);
+ assert.equal(c.lstNDVIChartTable(rows,'all').rows.length,2);assert.equal(c.lstNDVIChartTable(rows,'all').cols.length,25);assert.equal(c.lstNDVIChartTable(rows,'2014-01-01').rows[0].c[0].v,0);
+ const fitRows=[{month:1,NDVI:.4,LST_C:50},{month:1,NDVI:.8,LST_C:30},{month:2,NDVI:.4,LST_C:22},{month:2,NDVI:.8,LST_C:14}];
+ const hot=c.lstNDVIMonthFit(fitRows,1);assert(Math.abs(hot.slope+50)<1e-10);assert(Math.abs(hot.endpoints[0].x-.2)<1e-10);assert.equal(hot.endpoints[0].y,60);
+ const mild=c.lstNDVIMonthFit(fitRows,2);assert.equal(mild.endpoints[0].x,0);assert(Math.abs(mild.endpoints[0].y-30)<1e-10);
+ assert.equal(c.lstNDVIMonthFit([{month:1,NDVI:.5,LST_C:10},{month:1,NDVI:.5,LST_C:20}],1),null);
+ const positive=c.lstNDVIMonthFit([{month:1,NDVI:.2,LST_C:10},{month:1,NDVI:.8,LST_C:40}],1);assert.equal(positive.endpoints[0].x,0);
+ const flat=c.lstNDVIMonthFit([{month:1,NDVI:.2,LST_C:20},{month:1,NDVI:.8,LST_C:20}],1);assert.equal(flat.endpoints[0].y,20);
+ assert.equal(c.lstNDVIChartTable(fitRows,'all').rows.length,8);assert.equal(c.lstNDVIFitSeries('all')[12].lineWidth,2);assert.equal(c.lstNDVIFitSeries('all')[0].lineWidth,0);
  const stats=c.lstNDVIStats([0,1,null]);assert.equal(stats.n,2);assert.equal(stats.mean,.5);assert.equal(stats.p05,.05);assert.equal(stats.p95,.95);
  assert.equal(c.lstNDVIStats([]).p05,null);assert.equal(c.lstNDVIStats([.4]).p95,.4);
  const hist=c.lstNDVIHistogram(rows,'all');assert.equal(hist.stats.n,2);assert.equal(hist.table.rows.reduce((n,r)=>n+r.c[1].v,0),2);

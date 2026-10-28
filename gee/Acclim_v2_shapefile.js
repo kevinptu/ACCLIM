@@ -2966,16 +2966,49 @@ function sampleLSTNDVIPeriods(geom,year,boxKm,firstMonth,lastMonth) {
     pixels:pixels,paired_periods:joined.size(),reflectance_periods:reflectance.size(),lst_periods:lst.size(),
     pixel_size_m:projection.nominalScale()});
 }
-function lstNDVIChartTable(rows,period) {
-  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var cols=[{id:'NDVI',label:'NDVI (500 m values averaged within LST pixel)',type:'number'}];
-  var all=period==='all';
-  (all?months:['Daytime LST']).forEach(function(name){cols.push({label:name,type:'number'});});
-  var selected=rows.filter(function(r){return (all||r.date===period)&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C);});
-  return {cols:cols,rows:selected.map(function(r){var cells=[{v:r.NDVI}];
-    for(var m=1;m<=(all?12:1);m++)cells.push({v:!all||r.month===m?r.LST_C:null});
-    return {c:cells};})};
+function lstNDVIMonthFit(rows,month) {
+  var points=rows.filter(function(r){return r.month===month&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C);});
+  if(points.length<2)return null;
+  var mx=0,my=0;points.forEach(function(r){mx+=r.NDVI;my+=r.LST_C;});mx/=points.length;my/=points.length;
+  var xx=0,xy=0,maxX=-Infinity;
+  points.forEach(function(r){xx+=(r.NDVI-mx)*(r.NDVI-mx);xy+=(r.NDVI-mx)*(r.LST_C-my);maxX=Math.max(maxX,r.NDVI);});
+  if(xx<=1e-12)return null;
+  var slope=xy/xx,intercept=my-slope*mx,lo=0,hi=maxX;
+  if(hi<=0)return null;
+  // Draw the fitted span and extrapolate toward NDVI=0, clipped at LST=60 C.
+  if(Math.abs(slope)<1e-12){if(intercept>60)return null;}
+  else if(slope<0)lo=Math.max(lo,(60-intercept)/slope);
+  else hi=Math.min(hi,(60-intercept)/slope);
+  if(hi<=lo)return null;
+  return {month:month,n:points.length,slope:slope,intercept:intercept,
+    endpoints:[{x:lo,y:Math.min(60,intercept+slope*lo)},{x:hi,y:Math.min(60,intercept+slope*hi)}]};
 }
+function lstNDVIChartTable(rows,period) {
+  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],all=period==='all';
+  var selected=rows.filter(function(r){return (all||r.date===period)&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C);});
+  var monthIds=all?[1,2,3,4,5,6,7,8,9,10,11,12]:[Number(period.slice(5,7))];
+  var cols=[{id:'NDVI',label:'NDVI (500 m values averaged within LST pixel)',type:'number'}];
+  monthIds.forEach(function(m){cols.push({label:all?months[m-1]:'Daytime LST',type:'number'});});
+  monthIds.forEach(function(m){cols.push({label:months[m-1]+' monthly linear fit',type:'number'});});
+  function cells(x){var c=[{v:x}];for(var i=0;i<monthIds.length*2;i++)c.push({v:null});return c;}
+  var result=selected.map(function(r){var c=cells(r.NDVI);c[1+monthIds.indexOf(r.month)]={v:r.LST_C};return {c:c};});
+  monthIds.forEach(function(m,index){var fit=lstNDVIMonthFit(rows,m);if(!fit)return;
+    fit.endpoints.forEach(function(p){var c=cells(p.x);c[1+monthIds.length+index]={v:p.y};result.push({c:c});});
+  });
+  result.sort(function(a,b){return a.c[0].v-b.c[0].v;});
+  return {cols:cols,rows:result};
+}
+function lstNDVIFitSeries(period) {
+  var colors=['#313695','#4575b4','#74add1','#abd9e9','#66bd63','#1a9850','#fee08b','#fdae61','#f46d43','#d73027','#a50026','#762a83'];
+  var all=period==='all',n=all?12:1,series={};
+  for(var i=0;i<n;i++){
+    var color=colors[all?i:Number(period.slice(5,7))-1];
+    series[i]={color:color,lineWidth:0,pointSize:2};
+    series[n+i]={color:color,lineWidth:2,pointSize:0,visibleInLegend:false};
+  }
+  return series;
+}
+
 // Percentiles use linear interpolation at (n - 1) * p (R type 7).
 function lstNDVIStats(values) {
   var sorted=values.filter(carbonFinite).sort(function(a,b){return a-b;});
@@ -3018,10 +3051,10 @@ function runLSTNDVI(geom) {
     UI.runButton.setDisabled(false);
     if(!rows.length){setStatus('No paired, quality-screened LST-NDVI pixels for this year and box. Aqua records begin in July 2002.');return;}
     UI.resultsPanel.style().set({shown:true});UI.resultsOverlay.setExpanded(true);
-    function chart(period){return ui.Chart(lstNDVIChartTable(rows,period)).setChartType('ScatterChart').setOptions({
+    function chart(period){return ui.Chart(lstNDVIChartTable(rows,period)).setChartType('LineChart').setOptions({
       title:'Aqua MODIS daytime LST vs NDVI — '+(period==='all'?settings.year:period)+'\n'+settings.boxKm+' km square; '+pixelCount+' LST grid cells',
       hAxis:{title:'NDVI (mean within native 1 km LST pixel)'},vAxis:{title:'Daytime LST (°C)'},
-      pointSize:2,lineWidth:0,legend:{position:period==='all'?'bottom':'none'},
+      pointSize:2,lineWidth:0,interpolateNulls:true,series:lstNDVIFitSeries(period),legend:{position:period==='all'?'bottom':'none'},
       colors:period==='all'?['#313695','#4575b4','#74add1','#abd9e9','#66bd63','#1a9850','#fee08b','#fdae61','#f46d43','#d73027','#a50026','#762a83']:['#1976D2']});}
     var dates={};rows.forEach(function(r){dates[r.date]=true;});
     var annualAllowed=rows.length<=20000,initial=annualAllowed?'all':Object.keys(dates).sort()[0];
@@ -3054,6 +3087,7 @@ function runLSTNDVI(geom) {
         series:{0:{color:spec.color,lineWidth:2,pointSize:3},1:{color:'#757575',lineDashStyle:[4,4],lineWidth:1},
           2:{color:'#757575',lineDashStyle:[4,4],lineWidth:1}},interpolateNulls:false}));
     });
+    addChartNote(ui.Label('Monthly ordinary least-squares fits use all valid paired pixels in each calendar month. Lines extend toward NDVI = 0 and stop at 60 °C if reached first. An individual 8-day view retains its full-month fit. Months without NDVI variation have no fit.'));
     UI._lstNDVIRows=rows;
     setStatus('LST-NDVI ready: '+rows.length+' pairs; '+periods+' paired product intervals ('+available+' reflectance intervals available). No ACCLIM model calculations were run.');
   }
