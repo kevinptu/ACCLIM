@@ -2976,6 +2976,32 @@ function lstNDVIChartTable(rows,period) {
     for(var m=1;m<=(all?12:1);m++)cells.push({v:!all||r.month===m?r.LST_C:null});
     return {c:cells};})};
 }
+// Percentiles use linear interpolation at (n - 1) * p (R type 7).
+function lstNDVIStats(values) {
+  var sorted=values.filter(carbonFinite).sort(function(a,b){return a-b;});
+  if(!sorted.length)return {n:0,mean:null,p05:null,p95:null};
+  function quantile(p){var pos=(sorted.length-1)*p,lo=Math.floor(pos),hi=Math.ceil(pos);return sorted[lo]+(sorted[hi]-sorted[lo])*(pos-lo);}
+  return {n:sorted.length,mean:sorted.reduce(function(a,b){return a+b;},0)/sorted.length,p05:quantile(.05),p95:quantile(.95)};
+}
+function lstNDVIHistogram(rows,period) {
+  var selected=rows.filter(function(r){return (period==='all'||r.date===period)&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C);});
+  var bins=[];for(var i=0;i<40;i++)bins.push(0);
+  selected.forEach(function(r){var index=Math.max(0,Math.min(39,Math.floor((r.NDVI+1)/.05)));bins[index]++;});
+  return {stats:lstNDVIStats(selected.map(function(r){return r.NDVI;})),table:{cols:[
+    {label:'NDVI bin',type:'string'},{label:'Pixel–interval pairs',type:'number'}],
+    rows:bins.map(function(n,i){var low=-1+i*.05,high=low+.05;return {c:[{v:low.toFixed(2)+' to '+high.toFixed(2)},{v:n}]};})}};
+}
+function lstNDVITimeTable(rows,year,field) {
+  var groups={};rows.forEach(function(r){if(carbonFinite(r.NDVI)&&carbonFinite(r.LST_C)){if(!groups[r.date])groups[r.date]=[];groups[r.date].push(r[field]);}});
+  var table={cols:[{label:'Composite start',type:'date'},{label:'Mean',type:'number'},
+    {label:'5th percentile',type:'number'},{label:'95th percentile',type:'number'}],rows:[]};
+  for(var t=Date.UTC(year,0,1);t<Date.UTC(year+1,0,1);t+=8*86400000){
+    var key=new Date(t).toISOString().slice(0,10),stat=lstNDVIStats(groups[key]||[]),p=key.split('-');
+    table.rows.push({c:[{v:new Date(Number(p[0]),Number(p[1])-1,Number(p[2]))},{v:stat.mean},{v:stat.p05},{v:stat.p95}]});
+  }
+  return table;
+}
+
 function runLSTNDVI(geom) {
   var settings;
   try{settings=lstNDVISettings(UI.lstNDVIYear.getValue(),UI.lstNDVIBoxKm.getValue());}
@@ -3002,12 +3028,32 @@ function runLSTNDVI(geom) {
     addResultChart(chart(initial));
     var replace=chartReplacer();
     UI._chartCard.add(ui.Select({items:(annualAllowed?[{label:'All 8-day intervals (colored by month)',value:'all'}]:[]).concat(Object.keys(dates).sort().map(function(d){return {label:d,value:d};})),
-      value:initial,onChange:function(d){replace(chart(d));},style:{stretch:'horizontal'}}));
+      value:initial,onChange:function(d){replace(chart(d));if(replaceHistogram)replaceHistogram(histogram(d));},style:{stretch:'horizontal'}}));
     if(!annualAllowed)addChartNote(ui.Label('This box has more than 20,000 valid pairs. Select an 8-day interval to view all its pixels, or reduce the box for an annual view. No pairs were subsampled.'));
     var partial=rows.filter(function(r){return r.NDVI_valid_fraction<0.999;}).length;
     addChartNote(ui.Label({value:rows.length+' valid pixel–interval pairs across '+Object.keys(dates).length+' intervals. '+pixelCount+' grid-cell centers in box; native spacing '+pixelSize.toFixed(1)+' m.\n'+
       'NDVI is the area-weighted mean of quality-screened 500 m NDVI, not NDVI of averaged reflectance. '+partial+' pairs have partial NDVI coverage. Clouds, shadows, snow and poor-quality values are excluded; no gap filling.\n'+
       'MYD09A1 selected observations and MYD11A2 8-day means share the composite interval, not necessarily the observation day. LST QA: good quality and reported error ≤1 K. Dates are composite starts.',style:{whiteSpace:'pre-wrap'}}));
+    function histogram(period){
+      var h=lstNDVIHistogram(rows,period),s=h.stats;
+      return ui.Chart(h.table).setChartType('ColumnChart').setOptions({
+        title:'NDVI histogram — '+(period==='all'?settings.year:period)+'\n5th percentile: '+(s.n?s.p05.toFixed(3):'unavailable')+
+          ' | 95th percentile: '+(s.n?s.p95.toFixed(3):'unavailable')+' | n='+s.n,
+        hAxis:{title:'NDVI (bin width 0.05)',slantedText:true,slantedTextAngle:60},
+        vAxis:{title:'Pixel–interval pair count',viewWindow:{min:0}},legend:{position:'none'},
+        colors:['#2E7D32'],bar:{groupWidth:'95%'}});
+    }
+    addResultChart(histogram(initial));
+    var replaceHistogram=chartReplacer();
+    addChartNote(ui.Label('Histogram and percentiles follow the scatter interval selector. Each valid pixel–interval pair has equal weight; values are the 1 km means used in the scatter.'));
+    [{field:'NDVI',name:'NDVI',units:'NDVI',color:'#2E7D32'},
+      {field:'LST_C',name:'Daytime LST',units:'Daytime LST (°C)',color:'#D84315'}].forEach(function(spec){
+      addResultChart(ui.Chart(lstNDVITimeTable(rows,settings.year,spec.field)).setChartType('LineChart').setOptions({
+        title:spec.name+' time series — '+settings.year+'\nMean and spatial 5th–95th percentiles of paired pixels',
+        hAxis:{title:'8-day composite start'},vAxis:{title:spec.units},legend:{position:'bottom'},
+        series:{0:{color:spec.color,lineWidth:2,pointSize:3},1:{color:'#757575',lineDashStyle:[4,4],lineWidth:1},
+          2:{color:'#757575',lineDashStyle:[4,4],lineWidth:1}},interpolateNulls:false}));
+    });
     UI._lstNDVIRows=rows;
     setStatus('LST-NDVI ready: '+rows.length+' pairs; '+periods+' paired product intervals ('+available+' reflectance intervals available). No ACCLIM model calculations were run.');
   }
