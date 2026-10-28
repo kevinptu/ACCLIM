@@ -60,9 +60,9 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  ndvi_min: -0.10,
+  ndvi_min: 0,
   ndvi_max: 1,
-  ndvi_exp: 2.2
+  ndvi_exp: 2
 };
 
 var DATASETS = {
@@ -2903,6 +2903,128 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
 // END CARBON ASYNC UI
 
 
+// Standalone Aqua MODIS LST-NDVI diagnostic: no ACCLIM forcing or physiology.
+function lstNDVISettings(yearText,boxText) {
+  var year=Number(yearText),km=Number(boxText),latest=new Date().getUTCFullYear();
+  if(!/^\d{4}$/.test(String(yearText))||year<2002||year>latest)throw new Error('Choose a MODIS year from 2002 through '+latest+'.');
+  if(!isFinite(km)||km<0.5||km>50)throw new Error('Box side must be between 0.5 and 50 km.');
+  return {year:year,boxKm:km};
+}
+function lstNDVIBox(geom,km) {
+  var center=geom.centroid(1),ll=center.coordinates();
+  // Local UTM grid (polar stereographic outside UTM coverage), in metres.
+  var lon=ee.Number(ll.get(0)),lat=ee.Number(ll.get(1));
+  var zone=lon.add(180).divide(6).floor().add(1).max(1).min(60);
+  var code=ee.Number(ee.Algorithms.If(lat.gte(0),32600,32700)).add(zone);
+  code=ee.Number(ee.Algorithms.If(lat.gte(84),32661,ee.Algorithms.If(lat.lt(-80),32761,code)));
+  var proj=ee.Projection(ee.String('EPSG:').cat(code.format('%d')));
+  var xy=center.transform(proj,1).coordinates(),x=ee.Number(xy.get(0)),y=ee.Number(xy.get(1)),half=km*500;
+  return ee.Geometry.Rectangle(ee.List([x.subtract(half),y.subtract(half),x.add(half),y.add(half)]),proj,false);
+}
+function lstNDVIReflectance(image,projection) {
+  var red=image.select('sur_refl_b01').multiply(0.0001),nir=image.select('sur_refl_b02').multiply(0.0001);
+  var state=image.select('StateQA'),qa=image.select('QA');
+  var clear=state.bitwiseAnd(3).eq(0).and(state.bitwiseAnd(1<<2).eq(0))
+    .and(state.rightShift(8).bitwiseAnd(3).eq(0)).and(state.bitwiseAnd(1<<10).eq(0))
+    .and(state.bitwiseAnd(1<<12).eq(0)).and(state.bitwiseAnd(1<<13).eq(0)).and(state.bitwiseAnd(1<<15).eq(0));
+  var good=clear.and(qa.bitwiseAnd(3).lte(1)).and(qa.rightShift(2).bitwiseAnd(15).eq(0))
+    .and(qa.rightShift(6).bitwiseAnd(15).eq(0)).and(red.gte(0)).and(red.lte(1))
+    .and(nir.gte(0)).and(nir.lte(1)).and(nir.add(red).gt(0));
+  // Calculate NDVI at 500 m FIRST, then area-average valid NDVI within each LST cell.
+  var ndvi=nir.subtract(red).divide(nir.add(red)).updateMask(good).rename('NDVI');
+  var mean=ndvi.reduceResolution({reducer:ee.Reducer.mean(),maxPixels:64}).reproject(projection);
+  var fraction=ndvi.mask().unmask(0).reduceResolution({reducer:ee.Reducer.mean(),maxPixels:64})
+    .reproject(projection).rename('NDVI_valid_fraction');
+  return mean.addBands(fraction);
+}
+function sampleLSTNDVIPeriods(geom,year,boxKm,firstMonth,lastMonth) {
+  var box=lstNDVIBox(geom,boxKm),start=ee.Date.fromYMD(year,firstMonth,1);
+  var end=lastMonth===12?ee.Date.fromYMD(year+1,1,1):ee.Date.fromYMD(year,lastMonth+1,1);
+  var reflectance=ee.ImageCollection('MODIS/061/MYD09A1').filterDate(start,end).filterBounds(box);
+  var lstSource=ee.ImageCollection('MODIS/061/MYD11A2');
+  var projection=ee.Image(lstSource.first()).select('LST_Day_1km').projection();
+  var lst=lstSource.filterDate(start,end).filterBounds(box);
+  var joined=ee.ImageCollection(ee.Join.saveFirst('paired_lst').apply(reflectance,lst,
+    ee.Filter.equals({leftField:'system:time_start',rightField:'system:time_start'})));
+  var grid=ee.Image.pixelCoordinates(projection).rename(['pixel_x','pixel_y']);
+  var pixels=grid.sample({region:box,projection:projection,geometries:false,tileScale:4}).size();
+  var samples=ee.FeatureCollection(joined.toList(joined.size().max(1)).map(function(item){
+    var image=ee.Image(item),thermal=ee.Image(image.get('paired_lst'));
+    var qc=thermal.select('QC_Day'),raw=thermal.select('LST_Day_1km');
+    var good=qc.bitwiseAnd(3).eq(0).and(qc.rightShift(2).bitwiseAnd(3).eq(0))
+      .and(qc.rightShift(6).bitwiseAnd(3).eq(0)).and(raw.gt(0));
+    var temperature=raw.multiply(0.02).subtract(273.15).updateMask(good).rename('LST_C');
+    var aligned=lstNDVIReflectance(image,projection).addBands(temperature).addBands(grid);
+    var date=image.date(),stop=ee.Date(date.advance(8,'day').millis().min(ee.Date.fromYMD(year+1,1,1).millis()));
+    return aligned.sample({region:box,projection:projection,geometries:false,tileScale:4,dropNulls:true}).map(function(f){
+      return f.set({date:date.format('YYYY-MM-dd'),end_exclusive:stop.format('YYYY-MM-dd'),month:date.get('month'),
+        pixel_id:f.getNumber('pixel_x').format('%.1f').cat('_').cat(f.getNumber('pixel_y').format('%.1f')),
+        box_km:boxKm,year:year,LST_source:'MODIS/061/MYD11A2',NDVI_source:'MODIS/061/MYD09A1'});
+    });
+  })).flatten();
+  return ee.Dictionary({rows:samples.toList(samples.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}),
+    pixels:pixels,paired_periods:joined.size(),reflectance_periods:reflectance.size(),lst_periods:lst.size(),
+    pixel_size_m:projection.nominalScale()});
+}
+function lstNDVIChartTable(rows,period) {
+  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var cols=[{id:'NDVI',label:'NDVI (500 m values averaged within LST pixel)',type:'number'}];
+  var all=period==='all';
+  (all?months:['Daytime LST']).forEach(function(name){cols.push({label:name,type:'number'});});
+  var selected=rows.filter(function(r){return (all||r.date===period)&&carbonFinite(r.NDVI)&&carbonFinite(r.LST_C);});
+  return {cols:cols,rows:selected.map(function(r){var cells=[{v:r.NDVI}];
+    for(var m=1;m<=(all?12:1);m++)cells.push({v:!all||r.month===m?r.LST_C:null});
+    return {c:cells};})};
+}
+function runLSTNDVI(geom) {
+  var settings;
+  try{settings=lstNDVISettings(UI.lstNDVIYear.getValue(),UI.lstNDVIBoxKm.getValue());}
+  catch(error){setStatus(error.message);return;}
+  var request=UI._requestId,rows=[],periods=0,available=0,pixelCount=0,month=1,pixelSize=0;
+  UI.runButton.setDisabled(true);
+  var box=lstNDVIBox(geom,settings.boxKm);
+  if(UI.map){
+    UI.map.centerObject(box);
+    if(UI._lstNDVILayer)UI.map.layers().remove(UI._lstNDVILayer);
+    UI._lstNDVILayer=ui.Map.Layer(box,{color:'FF8800'},'LST-NDVI sampling box');UI.map.layers().add(UI._lstNDVILayer);
+  }
+  function finish(){
+    UI.runButton.setDisabled(false);
+    if(!rows.length){setStatus('No paired, quality-screened LST-NDVI pixels for this year and box. Aqua records begin in July 2002.');return;}
+    UI.resultsPanel.style().set({shown:true});UI.resultsOverlay.setExpanded(true);
+    function chart(period){return ui.Chart(lstNDVIChartTable(rows,period)).setChartType('ScatterChart').setOptions({
+      title:'Aqua MODIS daytime LST vs NDVI — '+(period==='all'?settings.year:period)+'\n'+settings.boxKm+' km square; '+pixelCount+' LST grid cells',
+      hAxis:{title:'NDVI (mean within native 1 km LST pixel)'},vAxis:{title:'Daytime LST (°C)'},
+      pointSize:2,lineWidth:0,legend:{position:period==='all'?'bottom':'none'},
+      colors:period==='all'?['#313695','#4575b4','#74add1','#abd9e9','#66bd63','#1a9850','#fee08b','#fdae61','#f46d43','#d73027','#a50026','#762a83']:['#1976D2']});}
+    var dates={};rows.forEach(function(r){dates[r.date]=true;});
+    var annualAllowed=rows.length<=20000,initial=annualAllowed?'all':Object.keys(dates).sort()[0];
+    addResultChart(chart(initial));
+    var replace=chartReplacer();
+    UI._chartCard.add(ui.Select({items:(annualAllowed?[{label:'All 8-day intervals (colored by month)',value:'all'}]:[]).concat(Object.keys(dates).sort().map(function(d){return {label:d,value:d};})),
+      value:initial,onChange:function(d){replace(chart(d));},style:{stretch:'horizontal'}}));
+    if(!annualAllowed)addChartNote(ui.Label('This box has more than 20,000 valid pairs. Select an 8-day interval to view all its pixels, or reduce the box for an annual view. No pairs were subsampled.'));
+    var partial=rows.filter(function(r){return r.NDVI_valid_fraction<0.999;}).length;
+    addChartNote(ui.Label({value:rows.length+' valid pixel–interval pairs across '+Object.keys(dates).length+' intervals. '+pixelCount+' grid-cell centers in box; native spacing '+pixelSize.toFixed(1)+' m.\n'+
+      'NDVI is the area-weighted mean of quality-screened 500 m NDVI, not NDVI of averaged reflectance. '+partial+' pairs have partial NDVI coverage. Clouds, shadows, snow and poor-quality values are excluded; no gap filling.\n'+
+      'MYD09A1 selected observations and MYD11A2 8-day means share the composite interval, not necessarily the observation day. LST QA: good quality and reported error ≤1 K. Dates are composite starts.',style:{whiteSpace:'pre-wrap'}}));
+    UI._lstNDVIRows=rows;
+    setStatus('LST-NDVI ready: '+rows.length+' pairs; '+periods+' paired product intervals ('+available+' reflectance intervals available). No ACCLIM model calculations were run.');
+  }
+  function next(){
+    if(request!==UI._requestId)return;
+    if(month>12){finish();return;}
+    setStatus('Sampling LST-NDVI: '+settings.year+', months '+month+'–'+Math.min(12,month+2)+'…');
+    sampleLSTNDVIPeriods(geom,settings.year,settings.boxKm,month,Math.min(12,month+2)).evaluate(function(data,error){
+      if(request!==UI._requestId)return;
+      if(error||!data){UI.runButton.setDisabled(false);setStatus('LST-NDVI error: '+(error||'No response'));return;}
+      rows=rows.concat(data.rows||[]);periods+=data.paired_periods;available+=data.reflectance_periods;pixelCount=data.pixels;pixelSize=data.pixel_size_m;
+      month+=3;next();
+    });
+  }
+  next();
+}
+
 var UI = {};  // namespace
 
 UI.mainPanel = ui.Panel({
@@ -2999,6 +3121,17 @@ UI.inputPanel.add(ui.Panel({widgets: [UI.latitude, UI.longitude],
   UI.inputPanel.add(pair.label);
   UI.inputPanel.add(pair.input);
 });
+
+// Standalone observed LST-NDVI analysis uses the same geometry controls.
+UI.analysisMode=ui.Select({items:[{label:'Run ACCLIM model',value:'model'},
+  {label:'Plot MODIS LST vs NDVI (no model run)',value:'lst_ndvi'}],value:'model',
+  onChange:function(mode){UI.lstNDVIControls.style().set({shown:mode==='lst_ndvi'});UI.runButton.setLabel(mode==='lst_ndvi'?'Plot LST vs NDVI':'Run ACCLIM');},style:{stretch:'horizontal'}});
+UI.lstNDVIYear=ui.Textbox({value:String(Number(DEFAULTS.startDate.slice(0,4))),placeholder:'Year (YYYY)'});
+UI.lstNDVIBoxKm=ui.Textbox({value:'10',placeholder:'Box side (km)'});
+UI.lstNDVIControls=ui.Panel({widgets:[ui.Label('LST-NDVI calendar year'),UI.lstNDVIYear,
+  ui.Label('Square box side (km; centered on selected geometry)'),UI.lstNDVIBoxKm,
+  ui.Label('Aqua MYD09A1 NDVI + MYD11A2 daytime LST, paired 8-day intervals. Uses the year above; model dates and weather selections are ignored.')],style:{shown:false}});
+UI.inputPanel.add(ui.Label('Analysis')).add(UI.analysisMode).add(UI.lstNDVIControls);
 
 // NOTE: ui.Label has no onClick in GEE. Buttons must be ui.Button. The
 // styling options on ui.Button are limited to: stretch, shown, position,
@@ -3458,7 +3591,7 @@ function setStatus(msg) {
 function clearResults() {
   UI._requestId++;
   UI._monthlyExportReady = false;
-  UI._lastNative=null; UI._lastAnnual=null; UI._lastCarbonMonthly=null;
+  UI._lastNative=null; UI._lastAnnual=null; UI._lastCarbonMonthly=null; UI._lstNDVIRows=null;
   UI._downloadRequestId = (UI._downloadRequestId || 0) + 1;
   UI.csvDownloadLink.style().set({shown: false});
   UI._lastOutput = null;
@@ -3565,6 +3698,7 @@ function onRun() {
     setStatus('Please enter coordinates and enable coordinate mode, draw a point/polygon, or choose a pre-loaded asset.');
     return;
   }
+  if(UI.analysisMode.getValue()==='lst_ndvi'){runLSTNDVI(geom);return;}
   if (!startDate || !endDate) {
     setStatus('Please fill both start and end dates (YYYY-MM-DD).');
     return;
