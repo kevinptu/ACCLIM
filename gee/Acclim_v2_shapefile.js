@@ -3203,7 +3203,8 @@ function soilSearchSettings(){
   if(!isFinite(s.cut)||s.cut<.05||s.cut>.8)throw new Error('EVI2 ceiling must be 0.05–0.8.');
   if(!isFinite(s.range)||s.range<.01||s.range>.3)throw new Error('Minimum red range must be 0.01–0.3.');
   if(!isFinite(s.tolerance)||s.tolerance<.001||s.tolerance>.05)throw new Error('Stability tolerance must be 0.001–0.05 reflectance.');
-  s.latText=String(UI.soilLat.getValue()).trim();s.lonText=String(UI.soilLon.getValue()).trim();
+  var latValue=UI.soilLat.getValue(),lonValue=UI.soilLon.getValue();
+  s.latText=latValue==null?'':String(latValue).trim();s.lonText=lonValue==null?'':String(lonValue).trim();
   if(s.latText||s.lonText){
     s.lat=Number(s.latText);s.lon=Number(s.lonText);
     if(!s.latText||!s.lonText||!isFinite(s.lat)||!isFinite(s.lon)||Math.abs(s.lat)>90||Math.abs(s.lon)>180)throw new Error('Enter both valid reference-center coordinates, or leave both blank.');
@@ -3407,8 +3408,8 @@ UI.inputPanel.add(ui.Label('Analysis')).add(UI.analysisMode).add(UI.lstNDVIContr
 UI.soilYear=ui.Textbox({value:String(Number(DEFAULTS.startDate.slice(0,4)))});
 UI.soilBox=ui.Textbox({value:'10'});
 UI.soilRings=ui.Select({items:[{label:'Original/reference box only',value:'0'},{label:'3 × 3 boxes (default)',value:'1'},{label:'5 × 5 boxes',value:'2'}],value:'1'});
-UI.soilLat=ui.Textbox({placeholder:'Optional reference-center latitude'});
-UI.soilLon=ui.Textbox({placeholder:'Optional reference-center longitude'});
+UI.soilLat=ui.Textbox({value:'',placeholder:'Optional reference-center latitude'});
+UI.soilLon=ui.Textbox({value:'',placeholder:'Optional reference-center longitude'});
 UI.soilCut=ui.Textbox({value:'0.25'});
 UI.soilRange=ui.Textbox({value:'0.04'});
 UI.soilTolerance=ui.Textbox({value:'0.01'});

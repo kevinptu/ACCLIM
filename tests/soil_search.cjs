@@ -20,6 +20,9 @@ for(const path of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  const curved=rows.map(r=>({...r,nir:.02+1.2*r.red+10*(r.red-.17)**2}));assert.equal(c.soilAssess(curved,{cut:.8,range:.04,tolerance:.003}).supported,false);
  const field=value=>({getValue:()=>value});
  c.UI={soilYear:field('2014'),soilBox:field('10'),soilRings:field('1'),soilCut:field('.25'),soilRange:field('.04'),soilTolerance:field('.01'),soilLat:field(''),soilLon:field('')};
+ for(const empty of [null,undefined,'','   ']){c.UI.soilLat=field(empty);c.UI.soilLon=field(empty);assert.equal(c.soilSearchSettings().latText,'');assert.equal(c.soilSearchSettings().lonText,'');}
+ c.UI.soilLat=field(0);c.UI.soilLon=field(0);assert.equal(c.soilSearchSettings().lat,0);assert.equal(c.soilSearchSettings().lon,0);
+ c.UI.soilLat=field('');c.UI.soilLon=field('');
  assert.equal(c.soilSearchSettings().rings,1);c.UI.soilLat=field('32');assert.throws(()=>c.soilSearchSettings());c.UI.soilLon=field('-106');assert.equal(c.soilSearchSettings().lat,32);
  c.UI.soilBox=field('20');assert.throws(()=>c.soilSearchSettings());
  // End-to-end standalone asynchronous callback path without model execution.
