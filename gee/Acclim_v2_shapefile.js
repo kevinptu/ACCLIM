@@ -3121,6 +3121,173 @@ function runLSTNDVI(geom) {
   next();
 }
 
+// Standalone soil-reference search. Empirical support does not verify soil identity.
+function soilQuantile(values,q) {
+  var v=values.slice().sort(function(a,b){return a-b;});
+  if(!v.length)return null;
+  var p=(v.length-1)*q,i=Math.floor(p);return v[i]+(v[Math.min(i+1,v.length-1)]-v[i])*(p-i);
+}
+function soilEVI2(red,nir){return 2.5*(nir-red)/(nir+2.4*red+1);}
+function soilLineEVI2(red,fit){return soilEVI2(red,fit.a*red+fit.b);}
+function soilFit(rows,q) {
+  if(rows.length<30)return null;
+  var counts={};rows.forEach(function(r){counts[r.month]=(counts[r.month]||0)+1;});
+  var months=Object.keys(counts).length;
+  function profile(a){
+    var v=rows.map(function(r){return {z:r.nir-a*r.red,w:1/(months*counts[r.month])};});
+    v.sort(function(x,y){return x.z-y.z;});
+    var cumulative=0,b=v[v.length-1].z;
+    for(var i=0;i<v.length;i++){cumulative+=v[i].w;if(cumulative>=q){b=v[i].z;break;}}
+    var loss=0;v.forEach(function(r){var e=r.z-b;loss+=r.w*(e>=0?q*e:(q-1)*e);});
+    return {a:a,b:b,loss:loss};
+  }
+  // Convex profile loss; broad numerical bracket, with boundary solutions rejected.
+  var lo=-20,hi=20,g=(Math.sqrt(5)-1)/2,c=hi-g*(hi-lo),d=lo+g*(hi-lo),fc=profile(c),fd=profile(d);
+  for(var j=0;j<42;j++){
+    if(fc.loss<fd.loss){hi=d;d=c;fd=fc;c=hi-g*(hi-lo);fc=profile(c);}
+    else{lo=c;c=d;fc=fd;d=lo+g*(hi-lo);fd=profile(d);}
+  }
+  var fit=profile((lo+hi)/2);return Math.abs(fit.a)>19.99?null:fit;
+}
+function soilPrepare(rows,cut){
+  var selected=rows.filter(function(r){return carbonFinite(r.red)&&carbonFinite(r.nir)&&r.red>=0&&r.red<=1&&r.nir>=0&&r.nir<=1&&r.red+r.nir>0&&soilEVI2(r.red,r.nir)<=cut;});
+  var lo=soilQuantile(selected.map(function(r){return r.red;}),.01),hi=soilQuantile(selected.map(function(r){return r.red;}),.99);
+  var core=selected.filter(function(r){return r.red>=lo&&r.red<=hi;}),counts={};
+  core.forEach(function(r){counts[r.month]=(counts[r.month]||0)+1;});
+  var months=Object.keys(counts).filter(function(m){return counts[m]>=30;});
+  core=core.filter(function(r){return months.indexOf(String(r.month))>=0;});
+  // Report only the brightness span actually supported by eligible months.
+  if(core.length){lo=Math.min.apply(null,core.map(function(r){return r.red;}));hi=Math.max.apply(null,core.map(function(r){return r.red;}));}
+  return {rows:core,lo:lo,hi:hi,months:months,selected:selected.length};
+}
+function soilAssess(rows,settings){
+  var p=soilPrepare(rows,settings.cut),out={total:rows.length,n:p.rows.length,months:p.months.length,lo:p.lo,hi:p.hi,reasons:[],supported:false};
+  if(p.rows.length<100||p.months.length<3||p.hi-p.lo<settings.range){out.reasons.push('Insufficient samples, months or red range');return out;}
+  var fit=soilFit(p.rows,.05);if(!fit){out.reasons.push('Numerical slope limit');return out;}out.fit=fit;
+  if(fit.a<=0)out.reasons.push('Nonpositive slope');
+  function departure(other){return Math.max(Math.abs((other.a-fit.a)*p.lo+other.b-fit.b),Math.abs((other.a-fit.a)*p.hi+other.b-fit.b));}
+  var q2=soilFit(p.rows,.02),q10=soilFit(p.rows,.10);
+  out.quantileShift=q2&&q10?Math.max(departure(q2),departure(q10)):Infinity;
+  if(out.quantileShift>settings.tolerance)out.reasons.push('Quantile sensitivity');
+  out.omissionShift=0;
+  p.months.forEach(function(m){var v=p.rows.filter(function(r){return String(r.month)!==m;}),f=soilFit(v,.05);out.omissionShift=Math.max(out.omissionShift,f?departure(f):Infinity);});
+  if(out.omissionShift>settings.tolerance)out.reasons.push('Month sensitivity');
+  out.curvature=0;out.bins=0;
+  for(var k=0;k<6;k++){
+    var left=p.lo+(p.hi-p.lo)*k/6,right=p.lo+(p.hi-p.lo)*(k+1)/6;
+    var residuals=p.rows.filter(function(r){return r.red>=left&&(k===5?r.red<=right:r.red<right);}).map(function(r){return r.nir-fit.a*r.red-fit.b;});
+    if(residuals.length>=20){out.bins++;out.curvature=Math.max(out.curvature,Math.abs(soilQuantile(residuals,.05)));}
+  }
+  if(out.bins<4)out.reasons.push('Insufficient brightness-bin support');
+  if(out.curvature>settings.tolerance)out.reasons.push('Curved lower boundary');
+  out.thresholdShift=0;
+  [settings.cut-.05,settings.cut+.05].forEach(function(cut){
+    var v=soilPrepare(rows,cut),f=v.rows.length>=100&&v.months.length>=3&&v.hi-v.lo>=settings.range?soilFit(v.rows,.05):null;
+    out.thresholdShift=Math.max(out.thresholdShift,f?departure(f):Infinity);
+  });
+  if(out.thresholdShift>settings.tolerance)out.reasons.push('EVI2 threshold sensitivity or insufficient support');
+  // PVI=0 exactly: NIR=aR+b. Uniform Red grid avoids random-draw regression bias.
+  var values=[];for(var t=0;t<=1000;t++)values.push(soilLineEVI2(p.lo+(p.hi-p.lo)*t/1000,fit));
+  out.eviMin=soilQuantile(values,.5);out.eviLow=Math.min.apply(null,values);out.eviHigh=Math.max.apply(null,values);
+  if(fit.a*p.lo+fit.b<0||fit.a*p.hi+fit.b>1||out.eviMin<0||out.eviMin>settings.cut)out.reasons.push('Implausible reference reflectance or EVI2');
+  out.supported=out.reasons.length===0;return out;
+}
+function soilSearchSettings(){
+  var s=lstNDVISettings(UI.soilYear.getValue(),UI.soilBox.getValue());
+  s.rings=Number(UI.soilRings.getValue());s.cut=Number(UI.soilCut.getValue());s.range=Number(UI.soilRange.getValue());s.tolerance=Number(UI.soilTolerance.getValue());
+  if(s.boxKm<2||s.boxKm>10)throw new Error('Reference box side must be 2–10 km.');
+  if([0,1,2].indexOf(s.rings)<0)throw new Error('Choose a supported search extent.');
+  if(!isFinite(s.cut)||s.cut<.05||s.cut>.8)throw new Error('EVI2 ceiling must be 0.05–0.8.');
+  if(!isFinite(s.range)||s.range<.01||s.range>.3)throw new Error('Minimum red range must be 0.01–0.3.');
+  if(!isFinite(s.tolerance)||s.tolerance<.001||s.tolerance>.05)throw new Error('Stability tolerance must be 0.001–0.05 reflectance.');
+  s.latText=String(UI.soilLat.getValue()).trim();s.lonText=String(UI.soilLon.getValue()).trim();
+  if(s.latText||s.lonText){
+    s.lat=Number(s.latText);s.lon=Number(s.lonText);
+    if(!s.latText||!s.lonText||!isFinite(s.lat)||!isFinite(s.lon)||Math.abs(s.lat)>90||Math.abs(s.lon)>180)throw new Error('Enter both valid reference-center coordinates, or leave both blank.');
+  }
+  return s;
+}
+function soilSearchTiles(target,reference,settings){
+  var base=lstNDVIBox(reference,settings.boxKm),proj=base.projection(),xy=reference.centroid(1).transform(proj,1).coordinates();
+  var x=ee.Number(xy.get(0)),y=ee.Number(xy.get(1)),step=settings.boxKm*1000,tiles=[];
+  for(var ring=0;ring<=settings.rings;ring++)for(var iy=-ring;iy<=ring;iy++)for(var ix=-ring;ix<=ring;ix++){
+    if(Math.max(Math.abs(ix),Math.abs(iy))!==ring)continue;
+    var cx=x.add(ix*step),cy=y.add(iy*step),box=ee.Geometry.Rectangle(ee.List([cx.subtract(step/2),cy.subtract(step/2),cx.add(step/2),cy.add(step/2)]),proj,false);
+    tiles.push({id:'R'+ring+' E'+ix+' N'+iy,box:box,ring:ring,center:box.centroid(1).coordinates(),distance:box.centroid(1).distance(target.centroid(1),1).divide(1000)});
+  }
+  return tiles;
+}
+function sampleSoilReference(box,year,firstMonth,lastMonth){
+  var source=ee.ImageCollection('MODIS/061/MYD09A1'),projection=ee.Image(source.first()).select('sur_refl_b01').projection().scale(2,2);
+  var start=ee.Date.fromYMD(year,firstMonth,1),end=lastMonth===12?ee.Date.fromYMD(year+1,1,1):ee.Date.fromYMD(year,lastMonth+1,1);
+  var images=source.filterBounds(box).filterDate(start,end),grid=ee.Image.pixelCoordinates(projection).rename(['pixel_x','pixel_y']);
+  var samples=ee.FeatureCollection(images.toList(images.size().max(1)).map(function(item){
+    var image=ee.Image(item);
+    // Reflectance-only sampling: do not require a coincident valid LST retrieval.
+    var reflectance=lstNDVIReflectance(image,projection).select(['red','nir','NDVI_valid_fraction']).addBands(grid);
+    return reflectance.sample({region:box,projection:projection,geometries:false,tileScale:4,dropNulls:true}).map(function(f){return f.set({date:image.date().format('YYYY-MM-dd'),month:image.date().get('month')});});
+  })).flatten();
+  return ee.Dictionary({rows:samples.toList(samples.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}),periods:images.size()});
+}
+function runSoilSearch(target){
+  var settings;try{settings=soilSearchSettings();}catch(e){setStatus(e.message);return;}
+  var reference=settings.latText?ee.Geometry.Point([settings.lon,settings.lat]):target.centroid(1);
+  var tiles=soilSearchTiles(target,reference,settings),request=UI._requestId,index=0,month=1,rows=[],results=[];
+  UI.runButton.setDisabled(true);UI.resultsPanel.style().set({shown:true});UI.resultsOverlay.setExpanded(true);
+  if(UI.map){UI.map.centerObject(lstNDVIBox(reference,settings.boxKm*(2*settings.rings+1)));UI._soilLayers=UI._soilLayers||[];
+    var targetLayer=ui.Map.Layer(target.centroid(1),{color:'00FFFF'},'Original model target');UI.map.layers().add(targetLayer);UI._soilLayers.push(targetLayer);}
+  var progress=ui.Label('Searching separate reference boxes…');UI.chartHolder.add(progress);
+  function render(){
+    var supported=results.filter(function(r){return r.assessment.supported;}).sort(function(a,b){return a.distance-b.distance;});
+    var summary=supported.length?supported.length+' statistically supported candidates. Nearest: '+supported[0].id+' ('+supported[0].distance.toFixed(1)+' km from target).':'No statistically supported soil reference found. Do not infer a local soil baseline from this search.';
+    if(supported.length){var vals=supported.map(function(r){return r.assessment.eviMin;});summary+=' Candidate EVI2min median '+soilQuantile(vals,.5).toFixed(4)+', range '+Math.min.apply(null,vals).toFixed(4)+'–'+Math.max.apply(null,vals).toFixed(4)+'.';}
+    progress.setValue(summary);
+    results.forEach(function(r){var a=r.assessment;UI.chartHolder.add(ui.Label(r.id+' | '+r.distance.toFixed(1)+' km | '+(a.eviMin===undefined?'EVI2min unavailable':'EVI2min '+a.eviMin.toFixed(4))+' | '+(a.supported?'supported candidate':a.reasons.join('; '))));});
+    UI.chartHolder.add(ui.Label('Empirical screening only: verify substrate, terrain, litter and exposed-soil identity before transferring a reference. No model parameter was changed. EVI2min is the median along PVI=0 on a uniform red grid; its range describes brightness dependence, not a confidence interval.'));
+    var holder=ui.Panel();UI.chartHolder.add(holder);
+    function show(id){
+      holder.clear();var r=results.filter(function(v){return v.id===id;})[0],a=r.assessment;
+      holder.add(ui.Label(r.id+' | center '+r.center[1].toFixed(5)+', '+r.center[0].toFixed(5)+' | '+r.distance.toFixed(1)+' km from original target'));
+      holder.add(ui.Label(a.supported?'Statistically supported candidate; soil identity unverified.':'Not supported: '+a.reasons.join('; ')));
+      holder.add(ui.Label(a.n+' fitting pairs / '+a.total+' total, '+a.months+' eligible months.'));
+      if(!a.fit)return;
+      function fmt(v){return isFinite(v)?v.toFixed(4):'insufficient support';}
+      holder.add(ui.Label('NIR = '+fmt(a.fit.a)+' × Red + '+fmt(a.fit.b)+'. Red range '+fmt(a.lo)+'–'+fmt(a.hi)+'. EVI2min '+fmt(a.eviMin)+' ('+fmt(a.eviLow)+'–'+fmt(a.eviHigh)+').'));
+      holder.add(ui.Label('Maximum NIR shifts: quantile '+fmt(a.quantileShift)+', omitted month '+fmt(a.omissionShift)+', EVI2 ceiling ±0.05 '+fmt(a.thresholdShift)+'. Binned boundary departure '+fmt(a.curvature)+'.'));
+      var points=r.rows.map(function(v){return {c:[{v:v.red},{v:v.nir},{v:null}]};});
+      points.push({c:[{v:a.lo},{v:null},{v:a.fit.a*a.lo+a.fit.b}]},{c:[{v:a.hi},{v:null},{v:a.fit.a*a.hi+a.fit.b}]});
+      points.sort(function(x,y){return x.c[0].v-y.c[0].v;});
+      holder.add(ui.Chart({cols:[{id:'red',label:'Red',type:'number'},{id:'nir',label:'All QA-valid pairs',type:'number'},{id:'fit',label:'5% boundary',type:'number'}],rows:points}).setChartType('LineChart').setOptions({title:'Reference '+r.id+' — '+settings.year,hAxis:{title:'Red reflectance'},vAxis:{title:'NIR reflectance'},interpolateNulls:true,series:{0:{lineWidth:0,pointSize:2,color:'#78909C'},1:{lineWidth:2,pointSize:0,color:'#111111'}}}));
+      var line=[];for(var k=0;k<=100;k++){var red=a.lo+(a.hi-a.lo)*k/100;line.push({c:[{v:red},{v:soilLineEVI2(red,a.fit)}]});}
+      holder.add(ui.Chart({cols:[{label:'Red',type:'number'},{label:'EVI2 at PVI = 0',type:'number'}],rows:line}).setChartType('LineChart').setOptions({title:'Bare-soil candidate EVI2 versus brightness',hAxis:{title:'Red reflectance'},vAxis:{title:'EVI2 at PVI = 0'},legend:{position:'none'}}));
+    }
+    UI.chartHolder.add(ui.Select({items:results.map(function(r){return {label:r.id+' — '+(r.assessment.supported?'supported candidate':'not supported')+' — '+r.distance.toFixed(1)+' km',value:r.id};}),value:supported.length?supported[0].id:results[0].id,onChange:show,style:{stretch:'horizontal'}}));
+    show(supported.length?supported[0].id:results[0].id);
+    UI._soilSearch={settings:settings,results:results};UI.runButton.setDisabled(false);setStatus('Soil-reference search complete. '+summary+' No ACCLIM model calculations were run.');
+  }
+  function next(){
+    if(request!==UI._requestId)return;
+    if(index>=tiles.length){render();return;}
+    var tile=tiles[index];setStatus('Soil reference '+(index+1)+'/'+tiles.length+' ('+tile.id+'), months '+month+'–'+(month+2)+'…');
+    sampleSoilReference(tile.box,settings.year,month,month+2).evaluate(function(data,error){
+      if(request!==UI._requestId)return;
+      if(error||!data){UI.runButton.setDisabled(false);setStatus('Soil-reference sampling failed: '+(error||'No response')+'. Reduce search extent or retry.');return;}
+      rows=rows.concat(data.rows||[]);month+=3;
+      if(month<=12){next();return;}
+      var assessment=soilAssess(rows,settings),savedRows=rows;
+      ee.Dictionary({center:tile.center,distance:tile.distance}).evaluate(function(meta,err){
+        if(request!==UI._requestId)return;
+        if(err||!meta){UI.runButton.setDisabled(false);setStatus('Reference geometry error: '+err);return;}
+        results.push({id:tile.id,center:meta.center,distance:meta.distance,assessment:assessment,rows:savedRows});
+        if(UI.map){var layer=ui.Map.Layer(tile.box,{color:assessment.supported?'22AA55':'CC8844'},tile.id+' '+(assessment.supported?'supported candidate':'not supported'),true);UI.map.layers().add(layer);UI._soilLayers.push(layer);}
+        progress.setValue(results.length+'/'+tiles.length+' boxes evaluated. '+results.filter(function(r){return r.assessment.supported;}).length+' supported candidates.');
+        rows=[];month=1;index++;ui.util.setTimeout(next,25);
+      });
+    });
+  }
+  next();
+}
+
 var UI = {};  // namespace
 
 UI.mainPanel = ui.Panel({
@@ -3220,8 +3387,9 @@ UI.inputPanel.add(ui.Panel({widgets: [UI.latitude, UI.longitude],
 
 // Standalone observed LST-NDVI analysis uses the same geometry controls.
 UI.analysisMode=ui.Select({items:[{label:'Run ACCLIM model',value:'model'},
-  {label:'Plot MODIS LST vs NDVI (no model run)',value:'lst_ndvi'}],value:'model',
-  onChange:function(mode){UI.lstNDVIControls.style().set({shown:mode==='lst_ndvi'});UI.runButton.setLabel(mode==='lst_ndvi'?'Plot LST vs NDVI':'Run ACCLIM');},style:{stretch:'horizontal'}});
+  {label:'Plot MODIS LST vs NDVI (no model run)',value:'lst_ndvi'},
+  {label:'Search for soil reference (no model run)',value:'soil_search'}],value:'model',
+  onChange:function(mode){UI.lstNDVIControls.style().set({shown:mode==='lst_ndvi'});UI.soilControls.style().set({shown:mode==='soil_search'});UI.runButton.setLabel(mode==='soil_search'?'Search soil references':mode==='lst_ndvi'?'Plot LST vs NDVI':'Run ACCLIM');},style:{stretch:'horizontal'}});
 UI.lstNDVIYear=ui.Textbox({value:String(Number(DEFAULTS.startDate.slice(0,4))),placeholder:'Year (YYYY)'});
 UI.lstNDVIBoxKm=ui.Textbox({value:'10',placeholder:'Box side (km)'});
 UI.lstNDVIQuality=ui.Select({items:[
@@ -3232,6 +3400,23 @@ UI.lstNDVIControls=ui.Panel({widgets:[ui.Label('LST-NDVI calendar year'),UI.lstN
   ui.Label('LST quality screening'),UI.lstNDVIQuality,
   ui.Label('Aqua MYD09A1 NDVI + MYD11A2 daytime LST, paired 8-day intervals. Uses the year above; model dates and weather selections are ignored.')],style:{shown:false}});
 UI.inputPanel.add(ui.Label('Analysis')).add(UI.analysisMode).add(UI.lstNDVIControls);
+
+UI.soilYear=ui.Textbox({value:String(Number(DEFAULTS.startDate.slice(0,4)))});
+UI.soilBox=ui.Textbox({value:'10'});
+UI.soilRings=ui.Select({items:[{label:'Original/reference box only',value:'0'},{label:'3 × 3 boxes (default)',value:'1'},{label:'5 × 5 boxes',value:'2'}],value:'1'});
+UI.soilLat=ui.Textbox({placeholder:'Optional reference-center latitude'});
+UI.soilLon=ui.Textbox({placeholder:'Optional reference-center longitude'});
+UI.soilCut=ui.Textbox({value:'0.25'});
+UI.soilRange=ui.Textbox({value:'0.04'});
+UI.soilTolerance=ui.Textbox({value:'0.01'});
+UI.soilControls=ui.Panel({widgets:[ui.Label('Soil-reference calendar year'),UI.soilYear,
+  ui.Label('Reference-box side (2–10 km)'),UI.soilBox,ui.Label('Expansion around reference center'),UI.soilRings,
+  ui.Label('Leave both coordinates blank to search around the original target. Enter both to shift only the reference search.'),UI.soilLat,UI.soilLon,
+  ui.Label('Maximum EVI2 for candidate fitting'),UI.soilCut,ui.Label('Minimum red-reflectance span'),UI.soilRange,
+  ui.Label('Maximum NIR departure for stability/curvature checks'),UI.soilTolerance,
+  ui.Label('Research screening defaults: 5% quantile; central 98% of red; ≥100 pairs, ≥3 months with ≥30 pairs each. Checks: 2–10% quantiles, month omission, ceiling ±0.05 and ≥4 populated brightness bins. Reflectance-only Aqua MYD09A1; no LST requirement. No automatic model-baseline changes.')],style:{shown:false}});
+UI.inputPanel.add(UI.soilControls);
+
 
 // NOTE: ui.Label has no onClick in GEE. Buttons must be ui.Button. The
 // styling options on ui.Button are limited to: stretch, shown, position,
@@ -3689,6 +3874,9 @@ function setStatus(msg) {
 }
 
 function clearResults() {
+  UI._soilSearch=null;
+  if(UI.map&&UI._soilLayers)UI._soilLayers.forEach(function(layer){UI.map.layers().remove(layer);});
+  UI._soilLayers=[];
   UI._requestId++;
   UI._monthlyExportReady = false;
   UI._lastNative=null; UI._lastAnnual=null; UI._lastCarbonMonthly=null; UI._lstNDVIRows=null;
@@ -3799,6 +3987,7 @@ function onRun() {
     return;
   }
   if(UI.analysisMode.getValue()==='lst_ndvi'){runLSTNDVI(geom);return;}
+  if(UI.analysisMode.getValue()==='soil_search'){runSoilSearch(geom);return;}
   if (!startDate || !endDate) {
     setStatus('Please fill both start and end dates (YYYY-MM-DD).');
     return;

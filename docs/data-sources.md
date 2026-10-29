@@ -115,3 +115,37 @@ Validation: a 2014 Tonzi 10 km test returned 117 native grid cells and 4,448 val
 The standalone diagnostic includes NIR versus red surface reflectance in place of the former histogram. Red is the x-axis and NIR the y-axis, in reflectance fractions. Both bands are area-averaged over the same quality-screened 500 m subpixels within each native LST cell, retaining the same valid LST–NDVI pixel–interval pairs. The plot follows the annual/8-day scatter selector and uses matching month colors. The two full-year time series still show NDVI and daytime LST means and spatial 5th/95th percentiles per composite (linear-interpolated percentiles at `(n-1)*p`). Empty intervals remain gaps. Contributing valid pixels can change over time.
 
 Monthly LST–NDVI lines use unweighted ordinary least squares over all valid pixel–interval pairs in each calendar month. The displayed domain extends from the largest observed NDVI toward zero, stopping at LST = 60 °C if that boundary is encountered first. Positive slopes are also clipped wherever they cross 60 °C. Months need at least two distinct NDVI values. Each line matches its month’s point color; individual interval views retain the corresponding pooled monthly fit. These fits are descriptive; no independence assumption or confidence interval is imposed on spatially/temporally repeated samples.
+
+## Standalone soil-reference search
+
+Choose **Search for soil reference (no model run)** under Analysis. The original target uses the existing coordinate/map/asset controls. Choose a year, reference-box side (2–10 km; default 10), and extent: one box, 3 × 3 (default), or 5 × 5. Boxes are evaluated center-first, then outward in non-overlapping rings in a local metric projection. The default extent is 30 × 30 km; the maximum is 50 × 50 km. Each box is fitted separately rather than pooling different backgrounds. The full requested extent is evaluated, even if the center passes, to allow comparison among references.
+
+Optional reference latitude/longitude shifts the search center without moving the original target or changing model coordinates. Leave both blank to expand around the target. Candidate distances are geodesic center-to-original-target distances. Original target and candidate boxes are added to the map; supported candidates are green and unsupported boxes amber. New runs/reset remove those diagnostic layers.
+
+The search uses quality-screened Aqua MYD09A1 reflectance only, with the existing clear-cloud, shadow, cirrus, snow and band-quality checks. It does not require LST or use the LST-quality selector. Valid 500 m red/NIR reflectances are averaged on the product's native projection scaled by two (nominal 1 km); partial coverage is retained and recorded. This differs from the LST-paired diagnostic's sampling/selection. Sampling is sequential in quarterly batches per box. Large searches take longer; no model forcing, GPP, ET, or carbon calculations run.
+
+### Candidate fitting and screening
+
+Defaults are exploratory research settings, not validated universal soil-identification rules:
+
+- Maximum observation EVI2 for fitting: **0.25**, adjustable from 0.05 to 0.8. EVI2 is computed from each averaged red/NIR pair.
+- Fit the **5th conditional percentile** of NIR against red, balancing total weight among eligible months. The JavaScript implementation profiles the weighted-quantile intercept and minimizes convex pinball loss. Numerical slopes at the search bracket boundaries (±20) are rejected.
+- Trim the outer 1% of selected red values on each side. Require at least **100 fitting observations**, **3 months with at least 30 observations each**, and a red span of **0.04** (adjustable). Report the actual supported span after excluding insufficiently sampled months.
+- Default maximum NIR departure is **0.01 reflectance** (adjustable). Compare the 2%/10% quantile lines and each leave-one-month-out line to the selected fit at both ends of its red range.
+- Six equal-width red bins test boundary shape. At least four must contain 20 observations; the largest absolute binned 5th-percentile residual must meet the same tolerance.
+- Repeat fitting with the EVI2 ceiling decreased/increased by 0.05. Insufficient support or an endpoint shift beyond tolerance fails this check. This guards against identifying the EVI2 selection boundary itself as soil.
+- Reject nonpositive slopes and implausible fitted reflectance/EVI2. These screens establish numerical support only; exposed-soil identity is **not** automatically established.
+
+### EVI2min and transfer
+
+For `NIR = a R + b`, signed `PVI = (NIR − a R − b) / sqrt(1 + a²)`. At PVI = 0:
+
+`EVI2soil(R) = 2.5 ((a − 1) R + b) / ((a + 2.4) R + b + 1)`.
+
+Evaluate this exact expression at 1,001 uniformly spaced red values over the supported fit range. Report the median as candidate EVI2min and the minimum/maximum as brightness dependence. This avoids deriving a linear intercept from arbitrary random red/NIR draws; it is not a confidence interval or an estimate weighted by the target's soil brightness distribution.
+
+Results list every box with distance, candidate EVI2min where estimable, and support/failure reasons. A selector displays all QA-valid pairs (including observations not used in fitting), the fitted boundary, and EVI2 along PVI = 0. The summary compares the supported candidates' estimates and identifies the nearest candidate for initial viewing. Even an unsupported fitted line can be inspected, but it is explicitly marked unsupported. The summary never transfers a rejected fit.
+
+**No model baseline is changed automatically.** The user must verify comparable soil/substrate, litter, terrain and exposure before transferring a reference to the target. Multiple supported lines may still represent different soils; their median is a descriptive comparison, not an automatic recommended calibration. If none passes, the tool reports no supported reference. The diagnostic state is retained in `UI._soilSearch` until the next run/reset; this version does not add an export or an apply-to-model button.
+
+Validation: the Jornada chart CSV reproduces slope 1.162162/intercept 0.032946 and passes default checks, with exact-line median EVI2min 0.093225. The Sierra conifer chart CSV fails default support screening. A fresh Earth Engine 2014 Jornada 10 km reflectance-only sample returned 5,281 pairs and a supported candidate near EVI2min 0.0945. Earth Engine checks also verified a 25-box shifted layout, target-distance preservation, a populated adjacent box, and an empty pre-Aqua period. Unit checks cover the public/private scripts, synthetic linear recovery, positive contamination, curved/insufficient samples, controls, asynchronous errors/cancellation and model bypass. The tests establish implementation behavior, not field validation of soil transfer.
