@@ -3129,6 +3129,7 @@ function soilQuantile(values,q) {
 }
 function soilEVI2(red,nir){return 2.5*(nir-red)/(nir+2.4*red+1);}
 function soilLineEVI2(red,fit){return soilEVI2(red,fit.a*red+fit.b);}
+function soilLineNDVI(red,fit){var nir=fit.a*red+fit.b,total=nir+red;return total>0?(nir-red)/total:null;}
 function soilFit(rows,q) {
   if(rows.length<30)return null;
   var counts={};rows.forEach(function(r){counts[r.month]=(counts[r.month]||0)+1;});
@@ -3187,8 +3188,10 @@ function soilAssess(rows,settings){
   });
   if(out.thresholdShift>settings.tolerance)out.reasons.push('EVI2 threshold sensitivity or insufficient support');
   // PVI=0 exactly: NIR=aR+b. Uniform Red grid avoids random-draw regression bias.
-  var values=[];for(var t=0;t<=1000;t++)values.push(soilLineEVI2(p.lo+(p.hi-p.lo)*t/1000,fit));
+  var values=[],ndviValues=[];for(var t=0;t<=1000;t++){var red=p.lo+(p.hi-p.lo)*t/1000;values.push(soilLineEVI2(red,fit));ndviValues.push(soilLineNDVI(red,fit));}
   out.eviMin=soilQuantile(values,.5);out.eviLow=Math.min.apply(null,values);out.eviHigh=Math.max.apply(null,values);
+  if(ndviValues.every(carbonFinite)){out.ndviMin=soilQuantile(ndviValues,.5);out.ndviLow=Math.min.apply(null,ndviValues);out.ndviHigh=Math.max.apply(null,ndviValues);}
+  else{out.ndviMin=null;out.ndviLow=null;out.ndviHigh=null;out.reasons.push('Undefined NDVI along reference line');}
   if(fit.a*p.lo+fit.b<0||fit.a*p.hi+fit.b>1||out.eviMin<0||out.eviMin>settings.cut)out.reasons.push('Implausible reference reflectance or EVI2');
   out.supported=out.reasons.length===0;return out;
 }
@@ -3240,10 +3243,10 @@ function runSoilSearch(target){
   function render(){
     var supported=results.filter(function(r){return r.assessment.supported;}).sort(function(a,b){return a.distance-b.distance;});
     var summary=supported.length?supported.length+' statistically supported candidates. Nearest: '+supported[0].id+' ('+supported[0].distance.toFixed(1)+' km from target).':'No statistically supported soil reference found. Do not infer a local soil baseline from this search.';
-    if(supported.length){var vals=supported.map(function(r){return r.assessment.eviMin;});summary+=' Candidate EVI2min median '+soilQuantile(vals,.5).toFixed(4)+', range '+Math.min.apply(null,vals).toFixed(4)+'–'+Math.max.apply(null,vals).toFixed(4)+'.';}
+    if(supported.length){var vals=supported.map(function(r){return r.assessment.eviMin;});summary+=' Candidate EVI2min median '+soilQuantile(vals,.5).toFixed(4)+', range '+Math.min.apply(null,vals).toFixed(4)+'–'+Math.max.apply(null,vals).toFixed(4)+'.';var ndviVals=supported.map(function(r){return r.assessment.ndviMin;});summary+=' Candidate NDVImin median '+soilQuantile(ndviVals,.5).toFixed(4)+', range '+Math.min.apply(null,ndviVals).toFixed(4)+'–'+Math.max.apply(null,ndviVals).toFixed(4)+'.';}
     progress.setValue(summary);
-    results.forEach(function(r){var a=r.assessment;UI.chartHolder.add(ui.Label(r.id+' | '+r.distance.toFixed(1)+' km | '+(a.eviMin===undefined?'EVI2min unavailable':'EVI2min '+a.eviMin.toFixed(4))+' | '+(a.supported?'supported candidate':a.reasons.join('; '))));});
-    UI.chartHolder.add(ui.Label('Empirical screening only: verify substrate, terrain, litter and exposed-soil identity before transferring a reference. No model parameter was changed. EVI2min is the median along PVI=0 on a uniform red grid; its range describes brightness dependence, not a confidence interval.'));
+    results.forEach(function(r){var a=r.assessment;UI.chartHolder.add(ui.Label(r.id+' | '+r.distance.toFixed(1)+' km | '+(a.eviMin===undefined?'EVI2min unavailable':'EVI2min '+a.eviMin.toFixed(4))+' | '+(carbonFinite(a.ndviMin)?'NDVImin '+a.ndviMin.toFixed(4):'NDVImin unavailable')+' | '+(a.supported?'supported candidate':a.reasons.join('; '))));});
+    UI.chartHolder.add(ui.Label('Empirical screening only: verify substrate, terrain, litter and exposed-soil identity before transferring a reference. No model parameter was changed. EVI2min and NDVImin are medians along PVI=0 on the same uniform red grid; their ranges describe brightness dependence, not confidence intervals.'));
     var holder=ui.Panel();UI.chartHolder.add(holder);
     function show(id){
       holder.clear();var r=results.filter(function(v){return v.id===id;})[0],a=r.assessment;
@@ -3251,15 +3254,15 @@ function runSoilSearch(target){
       holder.add(ui.Label(a.supported?'Statistically supported candidate; soil identity unverified.':'Not supported: '+a.reasons.join('; ')));
       holder.add(ui.Label(a.n+' fitting pairs / '+a.total+' total, '+a.months+' eligible months.'));
       if(!a.fit)return;
-      function fmt(v){return isFinite(v)?v.toFixed(4):'insufficient support';}
-      holder.add(ui.Label('NIR = '+fmt(a.fit.a)+' × Red + '+fmt(a.fit.b)+'. Red range '+fmt(a.lo)+'–'+fmt(a.hi)+'. EVI2min '+fmt(a.eviMin)+' ('+fmt(a.eviLow)+'–'+fmt(a.eviHigh)+').'));
+      function fmt(v){return carbonFinite(v)?v.toFixed(4):'insufficient support';}
+      holder.add(ui.Label('NIR = '+fmt(a.fit.a)+' × Red + '+fmt(a.fit.b)+'. Red range '+fmt(a.lo)+'–'+fmt(a.hi)+'. EVI2min '+fmt(a.eviMin)+' ('+fmt(a.eviLow)+'–'+fmt(a.eviHigh)+'). NDVImin '+fmt(a.ndviMin)+' ('+fmt(a.ndviLow)+'–'+fmt(a.ndviHigh)+').'));
       holder.add(ui.Label('Maximum NIR shifts: quantile '+fmt(a.quantileShift)+', omitted month '+fmt(a.omissionShift)+', EVI2 ceiling ±0.05 '+fmt(a.thresholdShift)+'. Binned boundary departure '+fmt(a.curvature)+'.'));
       var points=r.rows.map(function(v){return {c:[{v:v.red},{v:v.nir},{v:null}]};});
       points.push({c:[{v:a.lo},{v:null},{v:a.fit.a*a.lo+a.fit.b}]},{c:[{v:a.hi},{v:null},{v:a.fit.a*a.hi+a.fit.b}]});
       points.sort(function(x,y){return x.c[0].v-y.c[0].v;});
       holder.add(ui.Chart({cols:[{id:'red',label:'Red',type:'number'},{id:'nir',label:'All QA-valid pairs',type:'number'},{id:'fit',label:'5% boundary',type:'number'}],rows:points}).setChartType('LineChart').setOptions({title:'Reference '+r.id+' — '+settings.year,hAxis:{title:'Red reflectance'},vAxis:{title:'NIR reflectance'},interpolateNulls:true,series:{0:{lineWidth:0,pointSize:2,color:'#78909C'},1:{lineWidth:2,pointSize:0,color:'#111111'}}}));
-      var line=[];for(var k=0;k<=100;k++){var red=a.lo+(a.hi-a.lo)*k/100;line.push({c:[{v:red},{v:soilLineEVI2(red,a.fit)}]});}
-      holder.add(ui.Chart({cols:[{label:'Red',type:'number'},{label:'EVI2 at PVI = 0',type:'number'}],rows:line}).setChartType('LineChart').setOptions({title:'Bare-soil candidate EVI2 versus brightness',hAxis:{title:'Red reflectance'},vAxis:{title:'EVI2 at PVI = 0'},legend:{position:'none'}}));
+      var line=[];for(var k=0;k<=100;k++){var red=a.lo+(a.hi-a.lo)*k/100;line.push({c:[{v:red},{v:soilLineEVI2(red,a.fit)},{v:soilLineNDVI(red,a.fit)}]});}
+      holder.add(ui.Chart({cols:[{label:'Red',type:'number'},{label:'EVI2 at PVI = 0',type:'number'},{label:'NDVI at PVI = 0',type:'number'}],rows:line}).setChartType('LineChart').setOptions({title:'Bare-soil candidate indices versus brightness',hAxis:{title:'Red reflectance'},vAxis:{title:'Index at PVI = 0'},legend:{position:'bottom'}}));
     }
     UI.chartHolder.add(ui.Select({items:results.map(function(r){return {label:r.id+' — '+(r.assessment.supported?'supported candidate':'not supported')+' — '+r.distance.toFixed(1)+' km',value:r.id};}),value:supported.length?supported[0].id:results[0].id,onChange:show,style:{stretch:'horizontal'}}));
     show(supported.length?supported[0].id:results[0].id);

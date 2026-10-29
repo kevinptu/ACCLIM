@@ -142,6 +142,8 @@ For `NIR = a R + b`, signed `PVI = (NIR − a R − b) / sqrt(1 + a²)`. At PVI 
 
 `EVI2soil(R) = 2.5 ((a − 1) R + b) / ((a + 2.4) R + b + 1)`.
 
+The analogous bare-soil NDVI is `NDVIsoil(R) = ((a − 1) R + b) / ((a + 1) R + b)`. Both indices are evaluated on the same 1,001-point uniform red grid. NDVImin is the median of those NDVI values; its minimum/maximum show brightness dependence. A nonpositive NIR + Red denominator makes NDVI unavailable and prevents support of that candidate. NDVImin and its range appear alongside EVI2min in candidate details, the box comparison and supported-candidate summary. The brightness plot displays both indices. No model NDVI scaling parameter is changed.
+
 Evaluate this exact expression at 1,001 uniformly spaced red values over the supported fit range. Report the median as candidate EVI2min and the minimum/maximum as brightness dependence. This avoids deriving a linear intercept from arbitrary random red/NIR draws; it is not a confidence interval or an estimate weighted by the target's soil brightness distribution.
 
 Results list every box with distance, candidate EVI2min where estimable, and support/failure reasons. A selector displays all QA-valid pairs (including observations not used in fitting), the fitted boundary, and EVI2 along PVI = 0. The summary compares the supported candidates' estimates and identifies the nearest candidate for initial viewing. Even an unsupported fitted line can be inspected, but it is explicitly marked unsupported. The summary never transfers a rejected fit.

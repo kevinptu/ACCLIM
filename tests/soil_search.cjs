@@ -7,6 +7,12 @@ for(const path of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  for(let month=1;month<=6;month++)for(let i=0;i<100;i++){const red=.1+.15*i/99;rows.push({red,nir:1.2*red+.025,month});}
  const settings={cut:.25,range:.04,tolerance:.01};
  const a=c.soilAssess(rows,settings);assert(a.supported);assert(Math.abs(a.fit.a-1.2)<1e-5);assert(Math.abs(a.fit.b-.025)<1e-5);
+ const expectedNDVI=red=>(.2*red+.025)/(2.2*red+.025);
+ assert(Math.abs(a.ndviMin-expectedNDVI((a.lo+a.hi)/2))<1e-6);
+ assert(Math.abs(a.ndviLow-expectedNDVI(a.hi))<1e-6);assert(Math.abs(a.ndviHigh-expectedNDVI(a.lo))<1e-6);
+ assert.equal(c.soilLineNDVI(0,{a:1,b:0}),null);
+ assert.equal(c.soilLineNDVI(.1,{a:1,b:0}),0);
+ assert(Math.abs(c.soilLineNDVI(.1,{a:2,b:0})-1/3)<1e-12);
  assert.equal(c.soilAssess([],settings).supported,false);
  assert.equal(c.soilAssess(rows.filter(r=>r.month===1),settings).supported,false);
  assert.equal(c.soilAssess(rows.map(r=>({...r,red:.12})),settings).supported,false);
@@ -27,6 +33,7 @@ for(const path of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  c.ui={Label:v=>({value:v,setValue(x){this.value=x;}}),Panel:panel,Select:v=>v,Chart:v=>({setChartType(){return this;},setOptions(){return this;}}),util:{setTimeout:fn=>fn()}};
  c.setStatus=v=>status=v;c.runSoilSearch(target);
  assert.equal(sampling,4);assert.equal(disabled,false);assert(c.UI._soilSearch.results[0].assessment.supported);assert(status.includes('No ACCLIM model calculations'));
+ assert(status.includes('NDVImin median'));assert(panels.some(v=>v.value&&v.value.includes('NDVImin')));
  // Sampling errors release the button; cancellation ignores late callbacks.
  c.sampleSoilReference=()=>({evaluate:done=>done(null,'server failure')});c.runSoilSearch(target);assert.equal(disabled,false);assert(status.includes('server failure'));
  let pending;c.sampleSoilReference=()=>({evaluate:done=>pending=done});c.runSoilSearch(target);c.UI._requestId++;pending({rows});assert.equal(sampling,4);
