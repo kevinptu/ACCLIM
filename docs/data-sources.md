@@ -118,6 +118,44 @@ Monthly LST–NDVI lines use unweighted ordinary least squares over all valid pi
 
 ## Standalone soil-reference search
 
+### Current default: pooled geometric edge and PVI-intercept comparison
+
+The method selector now defaults to **Pooled edge + triangle geometry + PVI intercept**. The previous month-balanced quantile method remains available for comparison. Both use the same spatial search controls described below. Neither changes model parameters.
+
+The geometric method pools all screened observations across dates, without an EVI2 cutoff, equal-month weighting, or a requirement for each date to reproduce the line. It retains the central 98% of observed red values and generates up to 27 candidate edges from 12/18/24 equal-width red bins, 1%/2%/5% NIR quantiles, and full/darker-two-thirds/brighter-two-thirds sets of boundary anchors. Bins need 20 observations and a fit needs four anchors. A median-pairwise-slope fit with median intercept is iterated twice using detrended within-bin quantiles. This gives comparable influence to brightness intervals rather than densely populated vegetation clouds. Candidate slope must be positive and ≤20.
+
+Each candidate is evaluated against the whole pooled cloud, not only its originating anchors:
+
+- Near-edge tolerance is `max(0.002, tolerance/2)` NIR reflectance. At least four populated bins need three near-edge observations each, at least 20 near-edge pairs must exist overall, and their 5th–95th percentile red span must cover at least half of the pooled red range.
+- Where metadata exists, near-edge observations must span at least two composite dates and three native analysis-grid pixels. Different dates may support different portions of the edge. These are coverage checks, not independent sample-size claims.
+- The mean fraction below the line by more than the edge tolerance, balanced across populated red bins, must not exceed 10%. This discourages lines cutting through the cloud.
+- The fitted edge evaluated at supported dark/bright red endpoints supplies two candidate reference regions. The median red/NIR coordinates of observations in the top 5% of above-line NIR residuals supply a candidate vegetation region. A barycentric triangle test measures enclosure, with 5% coordinate tolerance. Vegetation height must exceed 0.02 NIR reflectance and bin-balanced enclosure must exceed 35%. These are exploratory defaults, not fixed universal tasseled-cap proportions.
+- Nonphysical fitted reference reflectance is rejected. A geometrically plausible edge still does not establish exposed-soil identity. A vegetation–shadow cloud can pass some of these tests; missing soil remains a possible interpretation.
+
+Candidate geometric score is `3 × below_fraction + max(0, 1 − supported_span) + (1 − enclosure) + max(0, 4 − supported_bins)`. Only candidates passing the above support checks enter the plausible-geometry comparison. If none passes, the best geometric exploratory fit is displayed rather than reporting that soil does not exist. Numerical/insufficient-data cases still return no fit.
+
+### Regression-based EVI2min and NDVImin
+
+For each plausible edge, draw **8,192 independent uniform red/NIR pairs**, using the same fixed seed (173) and initial draws for every geometry. Four visible controls set red and NIR minima/maxima (default 0–1 for each). Retain nonnegative PVI and positive red + NIR. At least 100 retained points and nonzero PVI variance are required. These are **simulated reflectances**, not observed satellite points or a claim that all combinations occur in nature.
+
+Calculate `PVI = (NIR − a Red − b) / sqrt(1 + a²)`. Ordinary least-squares intercepts of EVI2 versus PVI and NDVI versus PVI are the new primary EVI2min and NDVImin estimates. Report slopes, R², retained draw count and bounds. Also refit using the lower 50% and 75% of simulated PVI values to show intercept sensitivity to PVI fitting range. Compare the selected EVI2 intercept with a simulation using the observed central red/NIR ranges. Sampling-bound and PVI-range dependence are warnings, not automatic rejection criteria.
+
+Plausible candidates are ranked by geometric score plus `(absolute deviation from the plausible-candidate median EVI2 intercept + maximum EVI2 intercept shift across PVI ranges) / tolerance`. This prioritizes geometric support and intercept stability, never a predetermined intercept value. The research tolerance defaults to 0.01 and is editable. All candidate geometries remain inspectable. Broad intercept variation is reported explicitly rather than hidden by the selected candidate. The reported range across plausible geometries is a sensitivity range, not a confidence interval. Missing date/pixel metadata in imported diagnostic data is also reported.
+
+The previous exact-line medians remain comparison diagnostics only in this mode. They are not the new primary estimates. Do not compare new intercepts with old exact medians as though they were the same estimator.
+
+### Screening and outputs
+
+Both search methods now retain only MYD09A1 `StateQA` land/water bits 3–5 equal to 1 (land). Water, ephemeral water and mixed shorelines are excluded **before** averaging native 500 m red/NIR reflectance. Existing cloud, cloud-shadow, cirrus, snow and band-quality masks remain active. This extra mask applies to the soil-reference search, not the ACCLIM model or existing LST–NDVI diagnostic. Classification can miss subpixel water; the QA mask is not perfect water identification. See the [MYD09A1 catalog bit definitions](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MYD09A1).
+
+The results panel provides box comparisons and a geometry selector showing candidate EVI2 intercepts. For each geometry it plots the pooled red/NIR cloud, near-edge support, candidate dark/bright/vegetation regions and fitted edge. It lists the contributing composite dates and pixel count. Separate simulated EVI2–PVI and NDVI–PVI plots show regression lines. Geometry, intercepts and warnings remain in `UI._soilSearch`; no model-baseline transfer is automatic.
+
+Validation: unit tests cover sparse edges assembled from different dates, synthetic line recovery, one-date/one-pixel failures, missing metadata, deterministic simulations, OLS checks, degenerate ranges, controls and all three diagnostic charts for public/private scripts. Earth Engine synthetic tests verified that a half-water analysis pixel contains only land reflectance after masking, with valid fraction 0.5. Fresh 2014 10 km tests returned 4,752 Tonzi and 5,281 Jornada observations. Their selected edges had support on 14/30 dates and 69/106 pixels respectively. Under the default 0–1 simulation bounds, plausible-geometry EVI2 intercept ranges were approximately 0.021–0.179 at Tonzi and 0.090–0.094 at Jornada. Tonzi is reported as sensitive, not as a uniquely identified soil baseline. These checks verify behavior, not field validity.
+
+### Spatial controls and previous-method reference
+
+The paragraphs below describe the spatial controls shared by both methods and the retained **previous month-balanced** fitting/endpoint method. Its EVI2 ceiling, equal-month weighting and exact-line medians do not apply to the new geometric default.
+
 Choose **Search for soil reference (no model run)** under Analysis. The original target uses the existing coordinate/map/asset controls. Choose a year, reference-box side (2–10 km; default 10), and extent: one box, 3 × 3 (default), or 5 × 5. Boxes are evaluated center-first, then outward in non-overlapping rings in a local metric projection. The default extent is 30 × 30 km; the maximum is 50 × 50 km. Each box is fitted separately rather than pooling different backgrounds. The full requested extent is evaluated, even if the center passes, to allow comparison among references.
 
 Optional reference latitude/longitude shifts the search center without moving the original target or changing model coordinates. Leave both blank to expand around the target. Candidate distances are geodesic center-to-original-target distances. Original target and candidate boxes are added to the map; supported candidates are green and unsupported boxes amber. New runs/reset remove those diagnostic layers.

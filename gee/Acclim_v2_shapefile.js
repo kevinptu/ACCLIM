@@ -3161,7 +3161,7 @@ function soilPrepare(rows,cut){
   if(core.length){lo=Math.min.apply(null,core.map(function(r){return r.red;}));hi=Math.max.apply(null,core.map(function(r){return r.red;}));}
   return {rows:core,lo:lo,hi:hi,months:months,selected:selected.length};
 }
-function soilAssess(rows,settings){
+function soilAssessLegacy(rows,settings){
   var p=soilPrepare(rows,settings.cut),out={total:rows.length,n:p.rows.length,months:p.months.length,lo:p.lo,hi:p.hi,reasons:[],supported:false};
   if(p.rows.length<100||p.months.length<3||p.hi-p.lo<settings.range){out.reasons.push('Insufficient samples, months or red range');return out;}
   var fit=soilFit(p.rows,.05);if(!fit){out.reasons.push('Numerical slope limit');return out;}out.fit=fit;
@@ -3195,12 +3195,172 @@ function soilAssess(rows,settings){
   if(fit.a*p.lo+fit.b<0||fit.a*p.hi+fit.b>1||out.eviMin<0||out.eviMin>settings.cut)out.reasons.push('Implausible reference reflectance or EVI2');
   out.supported=out.reasons.length===0;return out;
 }
+// Pooled geometric soil-edge candidates. All thresholds are research diagnostics.
+function soilLandReflectance(image,projection){
+  // StateQA 3–5: retain land (1), exclude water and mixed shorelines BEFORE averaging.
+  return lstNDVIReflectance(image.updateMask(image.select('StateQA').rightShift(3).bitwiseAnd(7).eq(1)),projection);
+}
+function soilOLS(points){
+  if(points.length<3)return null;
+  var mx=0,my=0;points.forEach(function(p){mx+=p.x;my+=p.y;});mx/=points.length;my/=points.length;
+  var xx=0,xy=0,yy=0;points.forEach(function(p){xx+=(p.x-mx)*(p.x-mx);xy+=(p.x-mx)*(p.y-my);yy+=(p.y-my)*(p.y-my);});
+  if(xx<1e-14)return null;var a=xy/xx,b=my-a*mx;return {a:a,b:b,r2:yy>0?xy*xy/(xx*yy):null,n:points.length};
+}
+function soilRobustAnchors(points){
+  var slopes=[];for(var i=0;i<points.length;i++)for(var j=i+1;j<points.length;j++)if(Math.abs(points[i].x-points[j].x)>1e-8)slopes.push((points[j].y-points[i].y)/(points[j].x-points[i].x));
+  if(!slopes.length)return null;var a=soilQuantile(slopes,.5),b=soilQuantile(points.map(function(p){return p.y-a*p.x;}),.5);return {a:a,b:b};
+}
+function soilSimulation(fit,settings){
+  var bounds=settings.simBounds||[0,1,0,1],seed=173,points=[];
+  function random(){seed=(1664525*seed+1013904223)%4294967296;return seed/4294967296;}
+  // Common deterministic uniform draws for all candidate geometries.
+  for(var i=0;i<8192;i++){
+    var red=bounds[0]+(bounds[1]-bounds[0])*random(),nir=bounds[2]+(bounds[3]-bounds[2])*random();
+    var pvi=(nir-fit.a*red-fit.b)/Math.sqrt(1+fit.a*fit.a);
+    if(pvi>=0&&nir+red>0)points.push({x:pvi,y:soilEVI2(red,nir),ndvi:(nir-red)/(nir+red)});
+  }
+  if(points.length<100)return null;
+  var evi=soilOLS(points),ndvi=soilOLS(points.map(function(p){return {x:p.x,y:p.ndvi};}));
+  if(!evi||!ndvi)return null;
+  var fits=[evi],ndviFits=[ndvi];[.5,.75].forEach(function(q){var limit=soilQuantile(points.map(function(p){return p.x;}),q),subset=points.filter(function(p){return p.x<=limit;});fits.push(soilOLS(subset));ndviFits.push(soilOLS(subset.map(function(p){return {x:p.x,y:p.ndvi};})));});
+  return {evi:evi,ndvi:ndvi,points:points,bounds:bounds,horizons:fits,ndviHorizons:ndviFits,
+    horizonShift:Math.max.apply(null,fits.map(function(f){return Math.abs(f.b-evi.b);})),ndviHorizonShift:Math.max.apply(null,ndviFits.map(function(f){return Math.abs(f.b-ndvi.b);}))};
+}
+function soilGeometryCandidate(rows,lo,hi,bins,q,segment,tol){
+  var groups=[],anchors=[],k;
+  for(k=0;k<bins;k++)groups.push([]);
+  rows.forEach(function(r){groups[Math.min(bins-1,Math.floor((r.red-lo)/(hi-lo)*bins))].push(r);});
+  groups.forEach(function(g,index){if(g.length>=20)anchors.push({x:soilQuantile(g.map(function(r){return r.red;}),.5),y:soilQuantile(g.map(function(r){return r.nir;}),q),bin:index,n:g.length});});
+  var used=anchors.filter(function(p){return segment==='all'||(segment==='bright'?p.bin>=Math.floor(bins/3):p.bin<Math.ceil(2*bins/3));});
+  if(used.length<4)return null;
+  var fit=soilRobustAnchors(used);if(!fit)return null;
+  // Detrend before taking quantiles so bin width does not bias the NIR anchor.
+  for(k=0;k<2;k++){
+    used=used.map(function(p){var g=groups[p.bin];return {x:p.x,y:fit.a*p.x+fit.b+soilQuantile(g.map(function(r){return r.nir-fit.a*r.red-fit.b;}),q),bin:p.bin,n:p.n};});
+    fit=soilRobustAnchors(used);
+  }
+  if(!fit||fit.a<=0||fit.a>20)return null;
+  var support=[],supportBins=[],dates={},pixels={},belowFractions=[],edgeTol=Math.max(.002,tol/2);
+  groups.forEach(function(g,index){
+    if(g.length<20)return;
+    var near=g.filter(function(r){return Math.abs(r.nir-fit.a*r.red-fit.b)<=edgeTol;});
+    belowFractions.push(g.filter(function(r){return r.nir-fit.a*r.red-fit.b < -edgeTol;}).length/g.length);
+    if(near.length>=3){supportBins.push(index);support=support.concat(near);}
+  });
+  support.forEach(function(r){if(r.date)dates[r.date]=true;if(r.pixel_x!==undefined&&r.pixel_y!==undefined)pixels[r.pixel_x+':'+r.pixel_y]=true;});
+  var edgeLo=support.length?soilQuantile(support.map(function(r){return r.red;}),.05):lo;
+  var edgeHi=support.length?soilQuantile(support.map(function(r){return r.red;}),.95):hi;
+  var span=(edgeHi-edgeLo)/(hi-lo),below=belowFractions.reduce(function(a,b){return a+b;},0)/Math.max(1,belowFractions.length);
+  var residuals=rows.map(function(r){return r.nir-fit.a*r.red-fit.b;}),top=soilQuantile(residuals,.95);
+  var veg=rows.filter(function(r){return r.nir-fit.a*r.red-fit.b>=top;});
+  var apex={x:soilQuantile(veg.map(function(r){return r.red;}),.5),y:soilQuantile(veg.map(function(r){return r.nir;}),.5)};
+  var height=apex.y-fit.a*apex.x-fit.b;
+  // Barycentric enclosure: a proposed soil edge plus a robust vegetation region.
+  function enclosed(r){var w=height>0?(r.nir-fit.a*r.red-fit.b)/height:Infinity;
+    if(w<-.05||w>1.05)return false;var baseX=(r.red-w*apex.x)/Math.max(1e-8,1-w);return w>.95||(baseX>=edgeLo-.05*(hi-lo)&&baseX<=edgeHi+.05*(hi-lo));}
+  var enclosure=groups.filter(function(g){return g.length>=20;}).map(function(g){return g.filter(enclosed).length/g.length;});
+  var coverage=enclosure.reduce(function(a,b){return a+b;},0)/Math.max(1,enclosure.length),reasons=[];
+  if(supportBins.length<4||support.length<20||span<.5)reasons.push('Sparse or narrow edge support');
+  if(below>.1)reasons.push('Line cuts through lower observations');
+  if(fit.a*edgeLo+fit.b<0||fit.a*edgeHi+fit.b>1)reasons.push('Nonphysical reference reflectance');
+  if(height<.02||coverage<.35)reasons.push('Incomplete triangle / weak vegetation-region support');
+  var hasDates=rows.some(function(r){return !!r.date;}),hasPixels=rows.some(function(r){return r.pixel_x!==undefined&&r.pixel_y!==undefined;});
+  if(hasDates&&Object.keys(dates).length<2)reasons.push('Edge supported on only one date');
+  if(hasPixels&&Object.keys(pixels).length<3)reasons.push('Edge supported by too few pixels');
+  return {id:bins+' bins / q='+q+' / '+segment,fit:fit,q:q,bins:bins,segment:segment,anchors:used,support:support,
+    edgeLo:edgeLo,edgeHi:edgeHi,supportBins:supportBins.length,supportDates:Object.keys(dates).length,supportPixels:Object.keys(pixels).length,
+    metadataComplete:hasDates&&hasPixels,span:span,below:below,triangleCoverage:coverage,apex:apex,height:height,reasons:reasons,
+    score:3*below+Math.max(0,1-span)+(1-coverage)+Math.max(0,4-supportBins.length),plausible:reasons.length===0};
+}
+function soilAssessGeometry(input,settings){
+  var rows=input.filter(function(r){return carbonFinite(r.red)&&carbonFinite(r.nir)&&r.red>=0&&r.red<=1&&r.nir>=0&&r.nir<=1&&r.red+r.nir>0;});
+  var lo=soilQuantile(rows.map(function(r){return r.red;}),.01),hi=soilQuantile(rows.map(function(r){return r.red;}),.99);
+  rows=rows.filter(function(r){return r.red>=lo&&r.red<=hi;});
+  var months={};rows.forEach(function(r){if(r.month!==undefined)months[r.month]=true;});
+  var out={method:'geometry',total:input.length,n:rows.length,months:Object.keys(months).length,lo:lo,hi:hi,reasons:[],warnings:[],supported:false,candidates:[]};
+  if(rows.length<100||hi-lo<settings.range){out.reasons.push('Insufficient observations or red range');return out;}
+  [12,18,24].forEach(function(bins){[.01,.02,.05].forEach(function(q){['all','bright','dark'].forEach(function(segment){
+    var c=soilGeometryCandidate(rows,lo,hi,bins,q,segment,settings.tolerance);if(c)out.candidates.push(c);
+  });});});
+  if(!out.candidates.length){out.reasons.push('Too few populated brightness bins');return out;}
+  out.candidates.sort(function(a,b){return (a.plausible?0:1)-(b.plausible?0:1)||a.score-b.score;});
+  var plausible=out.candidates.filter(function(c){return c.plausible;});
+  // Compare intercepts only after geometric screening; never select for a desired value.
+  var compare=plausible.length?plausible:out.candidates.slice(0,1);
+  compare.forEach(function(c){c.sim=soilSimulation(c.fit,settings);});
+  var valid=compare.filter(function(c){return c.sim;});
+  var median=soilQuantile(valid.map(function(c){return c.sim.evi.b;}),.5);
+  valid.forEach(function(c){c.rank=c.score+(Math.abs(c.sim.evi.b-median)+c.sim.horizonShift)/Math.max(.001,settings.tolerance);});
+  valid.sort(function(a,b){return a.rank-b.rank;});
+  var best=valid.length?valid[0]:out.candidates[0];out.selected=best;out.fit=best.fit;
+  out.supported=best.plausible&&!!best.sim;out.reasons=best.reasons.slice();
+  if(!best.sim)out.reasons.push('Insufficient nonnegative-PVI simulation support');
+  if(!best.metadataComplete)out.warnings.push('Date/pixel support cannot be verified from this input');
+  if(!out.supported)out.warnings.push('Exploratory boundary only; missing soil branch remains possible');
+  if(best.sim){
+    out.eviMin=best.sim.evi.b;out.ndviMin=best.sim.ndvi.b;
+    var evi=valid.map(function(c){return c.sim.evi.b;}),ndvi=valid.map(function(c){return c.sim.ndvi.b;});
+    out.eviLow=Math.min.apply(null,evi);out.eviHigh=Math.max.apply(null,evi);out.ndviLow=Math.min.apply(null,ndvi);out.ndviHigh=Math.max.apply(null,ndvi);
+    if(out.eviHigh-out.eviLow>settings.tolerance)out.warnings.push('EVI2 intercept varies across plausible geometries');
+    if(best.sim.horizonShift>settings.tolerance)out.warnings.push('EVI2 intercept depends on PVI fitting range');
+    if(best.sim.ndviHorizonShift>settings.tolerance)out.warnings.push('NDVI intercept depends on PVI fitting range');
+    if(out.eviMin<0||out.eviMin>1)out.warnings.push('EVI2 intercept outside 0–1');
+    var local=soilSimulation(best.fit,{simBounds:[lo,hi,soilQuantile(rows.map(function(r){return r.nir;}),.01),soilQuantile(rows.map(function(r){return r.nir;}),.99)]});
+    out.observedDomainEvi=local?local.evi.b:null;
+    if(local&&Math.abs(local.evi.b-out.eviMin)>settings.tolerance)out.warnings.push('EVI2 intercept depends on reflectance sampling bounds');
+  }
+  var exact=[],nd=[];for(var i=0;i<=1000;i++){var x=best.edgeLo+(best.edgeHi-best.edgeLo)*i/1000;exact.push(soilLineEVI2(x,best.fit));nd.push(soilLineNDVI(x,best.fit));}
+  out.exactEviMedian=soilQuantile(exact,.5);out.exactNdviMedian=nd.every(carbonFinite)?soilQuantile(nd,.5):null;
+  // Keep only the selected simulation cloud; alternatives retain regression metrics.
+  out.candidates.forEach(function(c){if(c!==best&&c.sim)delete c.sim.points;});
+  return out;
+}
+function soilAssess(rows,settings){return settings.method==='geometry'?soilAssessGeometry(rows,settings):soilAssessLegacy(rows,settings);}
+function soilGeometryDisplay(holder,assessment,rows){
+  var candidates=assessment.candidates;
+  if(!candidates.length){holder.add(ui.Label(assessment.reasons.join('; ')));return;}
+  holder.add(ui.Label((assessment.supported?'Geometrically supported candidate for review. ':'Exploratory fit: '+assessment.reasons.join('; ')+'. ')+(assessment.warnings||[]).join('; ')));
+  holder.add(ui.Label('Intercept range across plausible geometries: EVI2 '+soilFormat(assessment.eviLow)+'–'+soilFormat(assessment.eviHigh)+', NDVI '+soilFormat(assessment.ndviLow)+'–'+soilFormat(assessment.ndviHigh)+'. These are sensitivity ranges, not confidence intervals.'));
+  var detail=ui.Panel();
+  function show(id){
+    detail.clear();var c=candidates.filter(function(v){return v.id===id;})[0];if(!c.sim||!c.sim.points)c.sim=soilSimulation(c.fit,UI._soilGeometrySettings);
+    candidates.forEach(function(other){if(other!==c&&other.sim)delete other.sim.points;});
+    var f=c.fit;detail.add(ui.Label('NIR = '+soilFormat(f.a)+' × Red + '+soilFormat(f.b)+'. '+c.support.length+' near-edge pairs in '+c.supportBins+' brightness bins, '+c.supportDates+' dates and '+c.supportPixels+' pixels.'));
+    detail.add(ui.Label('Edge span '+(100*c.span).toFixed(1)+'%; below-line fraction (bin-balanced) '+(100*c.below).toFixed(1)+'%; triangle enclosure '+(100*c.triangleCoverage).toFixed(1)+'%. '+(c.reasons.length?c.reasons.join('; '):'Geometric checks passed; soil identity unverified.')));
+    var points=rows.map(function(r){return {c:[{v:r.red},{v:r.nir},{v:null},{v:null},{v:null}]};});
+    c.support.forEach(function(r){points.push({c:[{v:r.red},{v:null},{v:r.nir},{v:null},{v:null}]});});
+    var vertices=[{x:c.edgeLo,y:f.a*c.edgeLo+f.b},{x:c.edgeHi,y:f.a*c.edgeHi+f.b},c.apex];
+    vertices.forEach(function(p){points.push({c:[{v:p.x},{v:null},{v:null},{v:p.y},{v:null}]});});
+    [c.edgeLo,c.edgeHi].forEach(function(x){points.push({c:[{v:x},{v:null},{v:null},{v:null},{v:f.a*x+f.b}]});});
+    points.sort(function(a,b){return a.c[0].v-b.c[0].v;});
+    detail.add(ui.Chart({cols:[{label:'Red',type:'number'},{label:'Screened observations',type:'number'},{label:'Edge support',type:'number'},{label:'Dark / bright / vegetation regions',type:'number'},{label:'Candidate soil edge',type:'number'}],rows:points}).setChartType('LineChart').setOptions({title:'Pooled geometric candidate',hAxis:{title:'Red reflectance'},vAxis:{title:'NIR reflectance'},interpolateNulls:true,series:{0:{pointSize:2,lineWidth:0,color:'#B0BEC5'},1:{pointSize:3,lineWidth:0,color:'#EF6C00'},2:{pointSize:8,lineWidth:0,color:'#1565C0'},3:{pointSize:0,lineWidth:2,color:'#111111'}}}));
+    var dates={};c.support.forEach(function(r){var date=r.date||'Date unavailable';dates[date]=(dates[date]||0)+1;});
+    detail.add(ui.Label('Edge contributions by composite date: '+Object.keys(dates).sort().map(function(d){return d+': '+dates[d];}).join(', ')));
+    if(c.sim){
+      detail.add(ui.Label('Simulation bounds [Rmin, Rmax, NIRmin, NIRmax]: '+c.sim.bounds.join(', ')+'. '+c.sim.points.length+' nonnegative-PVI pairs retained from 8192 uniform draws (seed 173).'));
+      detail.add(ui.Label('EVI2min intercept '+soilFormat(c.sim.evi.b)+'; slope '+soilFormat(c.sim.evi.a)+'; R² '+soilFormat(c.sim.evi.r2)+'. NDVImin intercept '+soilFormat(c.sim.ndvi.b)+'; R² '+soilFormat(c.sim.ndvi.r2)+'.'));
+      var exact=[];for(var t=0;t<=1000;t++)exact.push(soilLineEVI2(c.edgeLo+(c.edgeHi-c.edgeLo)*t/1000,c.fit));
+      detail.add(ui.Label('EVI2 intercepts using full / lower 50% / lower 75% PVI ranges: '+c.sim.horizons.map(function(f){return soilFormat(f.b);}).join(', ')+'. Exact soil-line EVI2 median (comparison only): '+soilFormat(soilQuantile(exact,.5))+'.'));
+      ['evi','ndvi'].forEach(function(key){var reg=c.sim[key],name=key==='evi'?'EVI2':'NDVI';
+        var table=c.sim.points.map(function(p){return {c:[{v:p.x},{v:key==='evi'?p.y:p.ndvi},{v:null}]};});
+        [0,Math.max.apply(null,c.sim.points.map(function(p){return p.x;}))].forEach(function(x){table.push({c:[{v:x},{v:null},{v:reg.a*x+reg.b}]});});table.sort(function(a,b){return a.c[0].v-b.c[0].v;});
+        detail.add(ui.Chart({cols:[{label:'PVI',type:'number'},{label:'Simulated '+name,type:'number'},{label:'OLS fit',type:'number'}],rows:table}).setChartType('LineChart').setOptions({title:name+' versus PVI — simulated reflectances',hAxis:{title:'PVI'},vAxis:{title:name},interpolateNulls:true,series:{0:{pointSize:2,lineWidth:0},1:{pointSize:0,lineWidth:2,color:'#111111'}}}));
+      });
+    }
+  }
+  holder.add(ui.Select({items:candidates.map(function(c){return {label:c.id+' — '+(c.plausible?'plausible':'exploratory')+(c.sim?' — EVI2 intercept '+soilFormat(c.sim.evi.b):''),value:c.id};}),value:assessment.selected.id,onChange:show,style:{stretch:'horizontal'}}));holder.add(detail);show(assessment.selected.id);
+}
+function soilFormat(v){return carbonFinite(v)?v.toFixed(4):'unavailable';}
+
 function soilSearchSettings(){
   var s=lstNDVISettings(UI.soilYear.getValue(),UI.soilBox.getValue());
+  s.method=UI.soilMethod?UI.soilMethod.getValue():'legacy';
+  s.simBounds=s.method==='geometry'?[UI.soilRmin,UI.soilRmax,UI.soilNmin,UI.soilNmax].map(function(w){return Number(w.getValue());}):[0,1,0,1];
+  if(s.simBounds.some(function(v){return !isFinite(v)||v<0||v>1;})||s.simBounds[0]>=s.simBounds[1]||s.simBounds[2]>=s.simBounds[3])throw new Error('Simulation bounds must be within 0–1, with each minimum smaller than its maximum.');
   s.rings=Number(UI.soilRings.getValue());s.cut=Number(UI.soilCut.getValue());s.range=Number(UI.soilRange.getValue());s.tolerance=Number(UI.soilTolerance.getValue());
   if(s.boxKm<2||s.boxKm>10)throw new Error('Reference box side must be 2–10 km.');
   if([0,1,2].indexOf(s.rings)<0)throw new Error('Choose a supported search extent.');
-  if(!isFinite(s.cut)||s.cut<.05||s.cut>.8)throw new Error('EVI2 ceiling must be 0.05–0.8.');
+  if(s.method==='legacy'&&(!isFinite(s.cut)||s.cut<.05||s.cut>.8))throw new Error('EVI2 ceiling must be 0.05–0.8.');
   if(!isFinite(s.range)||s.range<.01||s.range>.3)throw new Error('Minimum red range must be 0.01–0.3.');
   if(!isFinite(s.tolerance)||s.tolerance<.001||s.tolerance>.05)throw new Error('Stability tolerance must be 0.001–0.05 reflectance.');
   var latValue=UI.soilLat.getValue(),lonValue=UI.soilLon.getValue();
@@ -3228,7 +3388,7 @@ function sampleSoilReference(box,year,firstMonth,lastMonth){
   var samples=ee.FeatureCollection(images.toList(images.size().max(1)).map(function(item){
     var image=ee.Image(item);
     // Reflectance-only sampling: do not require a coincident valid LST retrieval.
-    var reflectance=lstNDVIReflectance(image,projection).select(['red','nir','NDVI_valid_fraction']).addBands(grid);
+    var reflectance=soilLandReflectance(image,projection).select(['red','nir','NDVI_valid_fraction']).addBands(grid);
     return reflectance.sample({region:box,projection:projection,geometries:false,tileScale:4,dropNulls:true}).map(function(f){return f.set({date:image.date().format('YYYY-MM-dd'),month:image.date().get('month')});});
   })).flatten();
   return ee.Dictionary({rows:samples.toList(samples.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}),periods:images.size()});
@@ -3236,6 +3396,7 @@ function sampleSoilReference(box,year,firstMonth,lastMonth){
 function runSoilSearch(target){
   var settings;try{settings=soilSearchSettings();}catch(e){setStatus(e.message);return;}
   var reference=settings.latText?ee.Geometry.Point([settings.lon,settings.lat]):target.centroid(1);
+  UI._soilGeometrySettings=settings;
   var tiles=soilSearchTiles(target,reference,settings),request=UI._requestId,index=0,month=1,rows=[],results=[];
   UI.runButton.setDisabled(true);UI.resultsPanel.style().set({shown:true});UI.resultsOverlay.setExpanded(true);
   if(UI.map){UI.map.centerObject(lstNDVIBox(reference,settings.boxKm*(2*settings.rings+1)));UI._soilLayers=UI._soilLayers||[];
@@ -3243,17 +3404,18 @@ function runSoilSearch(target){
   var progress=ui.Label('Searching separate reference boxes…');UI.chartHolder.add(progress);
   function render(){
     var supported=results.filter(function(r){return r.assessment.supported;}).sort(function(a,b){return a.distance-b.distance;});
-    var summary=supported.length?supported.length+' statistically supported candidates. Nearest: '+supported[0].id+' ('+supported[0].distance.toFixed(1)+' km from target).':'No statistically supported soil reference found. Do not infer a local soil baseline from this search.';
+    var summary=supported.length?supported.length+' candidate references for review. Nearest: '+supported[0].id+' ('+supported[0].distance.toFixed(1)+' km from target).':'No candidate passed the configured support checks. Inspect the exploratory fits and diagnostics; this does not establish that soil is absent.';
     if(supported.length){var vals=supported.map(function(r){return r.assessment.eviMin;});summary+=' Candidate EVI2min median '+soilQuantile(vals,.5).toFixed(4)+', range '+Math.min.apply(null,vals).toFixed(4)+'–'+Math.max.apply(null,vals).toFixed(4)+'.';var ndviVals=supported.map(function(r){return r.assessment.ndviMin;});summary+=' Candidate NDVImin median '+soilQuantile(ndviVals,.5).toFixed(4)+', range '+Math.min.apply(null,ndviVals).toFixed(4)+'–'+Math.max.apply(null,ndviVals).toFixed(4)+'.';}
     progress.setValue(summary);
-    results.forEach(function(r){var a=r.assessment;UI.chartHolder.add(ui.Label(r.id+' | '+r.distance.toFixed(1)+' km | '+(a.eviMin===undefined?'EVI2min unavailable':'EVI2min '+a.eviMin.toFixed(4))+' | '+(carbonFinite(a.ndviMin)?'NDVImin '+a.ndviMin.toFixed(4):'NDVImin unavailable')+' | '+(a.supported?'supported candidate':a.reasons.join('; '))));});
-    UI.chartHolder.add(ui.Label('Empirical screening only: verify substrate, terrain, litter and exposed-soil identity before transferring a reference. No model parameter was changed. EVI2min and NDVImin are medians along PVI=0 on the same uniform red grid; their ranges describe brightness dependence, not confidence intervals.'));
+    results.forEach(function(r){var a=r.assessment;UI.chartHolder.add(ui.Label(r.id+' | '+r.distance.toFixed(1)+' km | '+(!carbonFinite(a.eviMin)?'EVI2min unavailable':'EVI2min '+a.eviMin.toFixed(4))+' | '+(carbonFinite(a.ndviMin)?'NDVImin '+a.ndviMin.toFixed(4):'NDVImin unavailable')+' | '+(a.supported?'supported candidate':a.reasons.join('; '))));});
+    UI.chartHolder.add(ui.Label(settings.method==='geometry'?'Pooled geometric candidates; soil identity unverified. EVI2min and NDVImin are simulated index–PVI regression intercepts. Candidate ranges describe sensitivity, not confidence intervals. No model parameter was changed.': 'Empirical screening only: verify substrate, terrain, litter and exposed-soil identity before transferring a reference. No model parameter was changed. EVI2min and NDVImin are medians along PVI=0 on the same uniform red grid; their ranges describe brightness dependence, not confidence intervals.'));
     var holder=ui.Panel();UI.chartHolder.add(holder);
     function show(id){
       holder.clear();var r=results.filter(function(v){return v.id===id;})[0],a=r.assessment;
       holder.add(ui.Label(r.id+' | center '+r.center[1].toFixed(5)+', '+r.center[0].toFixed(5)+' | '+r.distance.toFixed(1)+' km from original target'));
       holder.add(ui.Label(a.supported?'Statistically supported candidate; soil identity unverified.':'Not supported: '+a.reasons.join('; ')));
       holder.add(ui.Label(a.n+' fitting pairs / '+a.total+' total, '+a.months+' eligible months.'));
+      if(a.method==='geometry'){soilGeometryDisplay(holder,a,r.rows);return;}
       if(!a.fit)return;
       function fmt(v){return carbonFinite(v)?v.toFixed(4):'insufficient support';}
       holder.add(ui.Label('NIR = '+fmt(a.fit.a)+' × Red + '+fmt(a.fit.b)+'. Red range '+fmt(a.lo)+'–'+fmt(a.hi)+'. EVI2min '+fmt(a.eviMin)+' ('+fmt(a.eviLow)+'–'+fmt(a.eviHigh)+'). NDVImin '+fmt(a.ndviMin)+' ('+fmt(a.ndviLow)+'–'+fmt(a.ndviHigh)+').'));
@@ -3405,6 +3567,9 @@ UI.lstNDVIControls=ui.Panel({widgets:[ui.Label('LST-NDVI calendar year'),UI.lstN
   ui.Label('Aqua MYD09A1 NDVI + MYD11A2 daytime LST, paired 8-day intervals. Uses the year above; model dates and weather selections are ignored.')],style:{shown:false}});
 UI.inputPanel.add(ui.Label('Analysis')).add(UI.analysisMode).add(UI.lstNDVIControls);
 
+UI.soilMethod=ui.Select({items:[{label:'Pooled edge + triangle geometry + PVI intercept',value:'geometry'},{label:'Previous month-balanced quantile method',value:'legacy'}],value:'geometry'});
+UI.soilRmin=ui.Textbox({value:'0'});UI.soilRmax=ui.Textbox({value:'1'});
+UI.soilNmin=ui.Textbox({value:'0'});UI.soilNmax=ui.Textbox({value:'1'});
 UI.soilYear=ui.Textbox({value:String(Number(DEFAULTS.startDate.slice(0,4)))});
 UI.soilBox=ui.Textbox({value:'10'});
 UI.soilRings=ui.Select({items:[{label:'Original/reference box only',value:'0'},{label:'3 × 3 boxes (default)',value:'1'},{label:'5 × 5 boxes',value:'2'}],value:'1'});
@@ -3413,12 +3578,14 @@ UI.soilLon=ui.Textbox({value:'',placeholder:'Optional reference-center longitude
 UI.soilCut=ui.Textbox({value:'0.25'});
 UI.soilRange=ui.Textbox({value:'0.04'});
 UI.soilTolerance=ui.Textbox({value:'0.01'});
-UI.soilControls=ui.Panel({widgets:[ui.Label('Soil-reference calendar year'),UI.soilYear,
+UI.soilControls=ui.Panel({widgets:[ui.Label('Soil-reference method'),UI.soilMethod,ui.Label('Soil-reference calendar year'),UI.soilYear,
   ui.Label('Reference-box side (2–10 km)'),UI.soilBox,ui.Label('Expansion around reference center'),UI.soilRings,
   ui.Label('Leave both coordinates blank to search around the original target. Enter both to shift only the reference search.'),UI.soilLat,UI.soilLon,
-  ui.Label('Maximum EVI2 for candidate fitting'),UI.soilCut,ui.Label('Minimum red-reflectance span'),UI.soilRange,
-  ui.Label('Maximum NIR departure for stability/curvature checks'),UI.soilTolerance,
-  ui.Label('Research screening defaults: 5% quantile; central 98% of red; ≥100 pairs, ≥3 months with ≥30 pairs each. Checks: 2–10% quantiles, month omission, ceiling ±0.05 and ≥4 populated brightness bins. Reflectance-only Aqua MYD09A1; no LST requirement. No automatic model-baseline changes.')],style:{shown:false}});
+  ui.Label('EVI2 ceiling (previous method only; ignored for geometry)'),UI.soilCut,ui.Label('Minimum red-reflectance span'),UI.soilRange,
+  ui.Label('Research tolerance (NIR edge checks / EVI2 intercept warnings)'),UI.soilTolerance,
+  ui.Label('Simulation red minimum / maximum'),UI.soilRmin,UI.soilRmax,
+  ui.Label('Simulation NIR minimum / maximum'),UI.soilNmin,UI.soilNmax,
+  ui.Label('Geometry: pooled dates, no EVI2 cutoff; 12/18/24 red bins and 1/2/5% lower quantiles. Fits seek support in ≥4 brightness intervals, ≥2 dates and ≥3 pixels when metadata is available. Triangle support and intercept sensitivity are diagnostics, not proof of soil identity. Simulations: 8192 reproducible independent uniform draws; retain PVI ≥0. Cloud/shadow/snow/water screening before aggregation. No automatic model-baseline changes.')],style:{shown:false}});
 UI.inputPanel.add(UI.soilControls);
 
 
