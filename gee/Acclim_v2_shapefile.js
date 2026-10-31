@@ -30,6 +30,7 @@ var ACCLIM_PARAMS = {
   fANPP_slope:    0.0129,
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
+  fDexp:          0.5,      // VPD attenuation exponent (VPDday_mean in kPa)
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
@@ -1135,8 +1136,10 @@ function computeDiagnostics(running, instant, params) {
   var QYC4_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC4));
 
   // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean
-  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean);
-  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean);
+  // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
+  var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
+  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD);
+  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD);
 
   // Mean daytime GPP
   var GPPday_mean_C3 = GPPmax_C3.multiply(p.GPPmean2GPPmax);
