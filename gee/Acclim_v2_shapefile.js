@@ -62,7 +62,7 @@ var ACCLIM_PARAMS = {
   // Intercepted PAR fraction used for water and energy partitioning.
   ndvi_min: 0,
   ndvi_max: 1,
-  ndvi_exp: 2
+  ndvi_exp: 1.6
 };
 
 var DATASETS = {
@@ -642,7 +642,7 @@ function sampleSatellite(geom,start,end,key,unpadded) {
   // Group pixels by their actual observation day BEFORE reducing spatially.
   // Same-day Terra/Aqua or HLS values are averaged with a common red/NIR mask.
   // Sample existing images only, rather than rebuilding every composite on every calendar day.
-  var sampled=ee.FeatureCollection(images.toList(images.size()).map(function(item) {
+  var sampled=ee.FeatureCollection(images.toList(images.size().max(1)).map(function(item) {
     var img=ee.Image(item),startDay=ee.Date(img.get('sample_millis'));
     var count=spec.kind==='vi'?ee.Date.fromYMD(startDay.get('year').add(1),1,1).difference(startDay,'day').min(16):ee.Number(1);
     return ee.List.sequence(0,count.subtract(1)).map(function(i) {
@@ -884,10 +884,10 @@ function assembleForcing(geom, startDate, endDate, config) {
   // Attach `dt` (days since previous timestep) to each feature so the model
   // is cadence-agnostic. First feature gets dt = 30 (typical month).
   var sorted = enriched.sort('millis');
-  var sortedList = sorted.toList(sorted.size());
+  var sortedList = sorted.toList(sorted.size().max(1));
   var dayMs = 86400000;
   var withDt = ee.FeatureCollection(
-    ee.List.sequence(0, sortedList.size().subtract(1)).map(function(i) {
+    ee.List.sequence(0, sortedList.size().subtract(1)).slice(0,sortedList.size()).map(function(i) {
       i = ee.Number(i);
       var f = ee.Feature(sortedList.get(i));
       var prevMillis = ee.Number(ee.Algorithms.If(
@@ -1512,8 +1512,8 @@ function fitSoilBucket(baseline, options) {
   var eligible = duration.gte(365).and(contiguous);
   var missingDays = baseline.map(function(f){return f.set('_missing_days',f.getNumber('period_seconds').multiply(f.getNumber('bucket_forcing_missing_pct')).divide(100));}).aggregate_sum('_missing_days');
   var missingPct = ee.Number(missingDays).divide(ee.Number(baseline.aggregate_sum('period_seconds')).max(1e-9)).multiply(100);
-  var rows = validRows.toList(validRows.size());
-  var scoringRows=validRows.select(['precip','period_days','period_seconds','daylight_seconds','daylength','fwet_mean','PT_mean','FIPAR','PredLEsday_mean','_bucket_surface','_bucket_demand','bucket_fit_observed']).toList(validRows.size());
+  var rows = validRows.toList(validRows.size().max(1));
+  var scoringRows=validRows.select(['precip','period_days','period_seconds','daylight_seconds','daylength','fwet_mean','PT_mean','FIPAR','PredLEsday_mean','_bucket_surface','_bucket_demand','bucket_fit_observed']).toList(validRows.size().max(1));
   function score(cap) {
     cap = ee.Number(cap);
     var trajectory = soilBucketTrajectory(scoringRows, cap, false);
@@ -1594,7 +1594,7 @@ function fitETBucket(nearSurface, options) {
       PredLEcday_mean: 0, PredLEiday_mean: 0})));
   });
   var fitted = fitSoilBucket(proxy, options);
-  var pairs = nearSurface.toList(nearSurface.size()).zip(fitted.toList(fitted.size()));
+  var pairs = nearSurface.toList(nearSurface.size().max(1)).zip(fitted.toList(fitted.size().max(1)));
   return ee.FeatureCollection(pairs.map(function(pair) {
     pair = ee.List(pair);
     var original = ee.Feature(pair.get(0)), et = ee.Feature(pair.get(1));
@@ -1826,9 +1826,9 @@ function runACCLIM(forcingFC, params) {
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
-  var ordered = forcingFC.sort('millis').toList(forcingFC.size());
+  var ordered = forcingFC.sort('millis').toList(forcingFC.size().max(1));
   // Retain elapsed time across unavailable physiological periods; do not invent carbon.
-  var forcingList = ee.List.sequence(0,ordered.size().subtract(1)).map(function(i) {
+  var forcingList = ee.List.sequence(0,ordered.size().subtract(1)).slice(0,ordered.size()).map(function(i) {
     i=ee.Number(i);var f=ee.Feature(ordered.get(i));
     var previous=ee.Feature(ordered.get(i.subtract(1).max(0)));
     var elapsed=ee.Number(ee.Algorithms.If(i.eq(0),f.get('period_seconds'),
@@ -1836,9 +1836,9 @@ function runACCLIM(forcingFC, params) {
     return f.set({dt:elapsed.divide(86400),elapsed_seconds:elapsed});
   });
   var initial = computeInitialState(forcingList, p);
-  var finalState = ee.Dictionary(forcingList.iterate(function(curr, prev) {
+  var finalState = ee.Dictionary(ee.Algorithms.If(forcingList.size().gt(0), forcingList.iterate(function(curr, prev) {
     return acclimStep(curr, prev, p);
-  }, initial));
+  }, initial), ee.Dictionary({history:ee.List([])})));
   var baseline = ee.FeatureCollection(ee.List(finalState.get('history'))).merge(missingForcing).sort('millis');
   if (p.deferBuckets) return baseline;
   return finishACCLIM(baseline,p);
@@ -2033,7 +2033,7 @@ function attachLandsatLST(output, geom, start, end) {
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
   function materialize(fc,next) {
-    fc.toList(fc.size()).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(rows,error) {
+    fc.toList(fc.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(rows,error) {
       if(request!==UI._requestId)return;
       if(error){done(null,error);return;}
       try {next(rows,ee.FeatureCollection(rows.map(function(r){return ee.Feature(geom,r);})));
@@ -2801,8 +2801,8 @@ function loadCarbonProducts(output, geom, start, end, requestId, regionName, c4C
 }
 function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, sandPercent, c4Chart) {
   var context = fetchCarbonAnnualContext(geom, start, end, {weatherPlan:UI._runWeatherPlan,weatherSource:UI._lastRun.weatherSource,satelliteSource:UI._lastRun.satelliteSource});
-  var monthlyProperties = output.toList(output.size()).map(function(f) { return ee.Feature(f).toDictionary(); });
-  var annualProperties = context.toList(context.size()).map(function(f) { return ee.Feature(f).toDictionary(); });
+  var monthlyProperties = output.toList(output.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); });
+  var annualProperties = context.toList(context.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); });
   ee.Dictionary({monthly: monthlyProperties, annual: annualProperties}).evaluate(function(result, error) {
     if (requestId !== UI._requestId) return;
     UI.runButton.setDisabled(false);
@@ -3986,7 +3986,7 @@ function loadThermalComparisons(cache, geom, start, end, requestId) {
     }
     try {
       var observations = fetch(dates, geom, first, last);
-      observations.toList(observations.size()).map(function(f) { return ee.Feature(f).toDictionary(); }).evaluate(finish);
+      observations.toList(observations.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); }).evaluate(finish);
     } catch (error) { finish(null, error.message); }
   }
   load('Terra LST (MOD11A1)', 'LST', attachMonthlyLST);
