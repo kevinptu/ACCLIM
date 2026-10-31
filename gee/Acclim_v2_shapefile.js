@@ -2790,6 +2790,20 @@ function addWeatherCharts(output, rows, regionName) {
   var replaceScatter = chartReplacer();
   UI._chartCard.add(ui.Select({items: ['WUE', 'gs'], value: 'WUE',
     onChange: function(metric) { replaceScatter(scatter(metric)); }, style: {margin: '4px 8px'}}));
+  // EVI2 paired with native-timestep Priestley-Taylor daytime energy flux.
+  var eviPTPairs = rows.filter(function(r) {
+    return carbonFinite(r.PT_mean) && carbonFinite(r.EVI2);
+  });
+  var eviPTTable = {cols: [
+    {id: 'PT_mean', label: 'PT_mean (W/m²)', type: 'number'},
+    {id: 'EVI2', label: 'EVI2', type: 'number'}],
+    rows: eviPTPairs.map(function(r) { return {c: [{v: r.PT_mean}, {v: r.EVI2}]}; })};
+  addResultChart(ui.Chart(eviPTTable).setChartType('ScatterChart').setOptions({
+    title: regionChartTitle('EVI2 vs PT_mean', regionName), chartArea: {top: 80},
+    hAxis: {title: 'PT_mean (W/m²; daytime)'}, vAxis: {title: 'EVI2'},
+    legend: {position: 'none'}, colors: ['#8E24AA'],
+    pointSize: 4, pointShape: 'circle', lineWidth: 0
+  }));
 }
 
 // BEGIN CARBON ASYNC UI
