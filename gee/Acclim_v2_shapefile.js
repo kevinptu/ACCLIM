@@ -2050,8 +2050,20 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       setStatus('Calculating native '+rows[0].model_cadence+' physiology...');
       materialize(runACCLIM(forcing,mergeParams(params,{deferBuckets:true})),function(baselineRows,baseline) {
         setStatus('Fitting soil-water buckets and bridging missing forcing...');
-        var fitted=ee.FeatureCollection(fitNativeBuckets(baselineRows,params).map(function(r){return ee.Feature(geom,r);}));
-        materialize(finishACCLIM(baseline,mergeParams(params,{fittedBuckets:fitted})),function(result,output){done(output);});
+        // Fit once over the full trajectory; only independent final diagnostics are batched.
+        var fittedRows=fitNativeBuckets(baselineRows,params), finalRows=[], offset=0;
+        function finishBatch() {
+          if(request!==UI._requestId)return;
+          if(offset>=fittedRows.length){done(ee.FeatureCollection(finalRows.map(function(r){return ee.Feature(geom,r);})).sort('millis'));return;}
+          var endOffset=Math.min(offset+90,fittedRows.length);
+          setStatus('Calculating final flux diagnostics: '+(offset+1)+'–'+endOffset+' of '+fittedRows.length+' periods...');
+          var fitted=ee.FeatureCollection(fittedRows.slice(offset,endOffset).map(function(r){return ee.Feature(geom,r);}));
+          // Keep the full baseline for any fitted EVI2 bounds, consistent across batches.
+          materialize(finishACCLIM(baseline,mergeParams(params,{fittedBuckets:fitted})),function(result) {
+            finalRows=finalRows.concat(result);offset=endOffset;finishBatch();
+          });
+        }
+        finishBatch();
       });
     });
   }
