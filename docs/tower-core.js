@@ -172,7 +172,7 @@ function transferSummary(data,start,end,cadence){
   if(start<first||end>last)throw Error('Choose dates within the loaded record: '+first+' to '+last+'.');
   const out={};for(const k of ['version','site','latitude','longitude','units','filter','gppVariable','secondVariable','radiationVariable','intervalMinutes','provenance','leVariable'])out[k]=data[k];
   if(data.weather){
-    cadence=cadence||data.weather.cadence||'monthly';
+    cadence=cadence||(Array.isArray(data.weather.daily)?'daily':'monthly');
     const periods=weatherTools.periods(data.weather,cadence,start,end,data.intervalMinutes);
     out.weather={version:data.weather.version,energyBasis:data.weather.energyBasis,source:data.weather.source,
       policy:'complete_calendar_period',units:{...data.weather.units,precip:'mm/period'},cadence,periods,

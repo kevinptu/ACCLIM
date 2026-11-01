@@ -1,8 +1,8 @@
 /**
  * ACCLIM research web app — selectable weather and satellite reflectance.
- * TerraClimate: monthly physiology. ERA5-Land / GRIDMET: daily physiology.
- * Native output is retained; daily fluxes are aggregated for monthly comparisons.
- * Tower-weather input currently uses the importer's monthly summaries.
+ * One app Timestep selection aggregates all inputs before shared physiology.
+ * Charts and CSV use the selected daily, weekly or monthly intervals.
+ * The importer preserves daily tower weather and flux sums/counts.
  * Satellite red/NIR: quality screening, actual dates where available, otherwise
  * composite midpoints; paired linear interpolation with bounded gaps.
  * Bucket-only interpolation preserves storage; missing carbon stays unavailable.
@@ -530,6 +530,70 @@ function periodCarbonByDay(rows,start,end) {
   return byDay;
 }
 
+// Shared, clipped intervals for every model input, chart and export.
+function selectedTimestepPeriods(start,end,cadence) {
+  if(['daily','weekly','monthly'].indexOf(cadence)<0)throw new Error('Choose Daily, Weekly or Monthly.');
+  var a=carbonDateMillis(start),stop=carbonDateMillis(end)+86400000,out=[];
+  if(!isFinite(a)||!isFinite(stop)||stop<=a||(stop-a)/86400000>40000)throw new Error('Invalid timestep date range.');
+  while(a<stop) {
+    var d=new Date(a),y=d.getUTCFullYear(),b;
+    if(cadence==='monthly')b=Date.UTC(y,d.getUTCMonth()+1,1);
+    else if(cadence==='weekly')b=Math.min(Date.UTC(y,0,1)+(Math.floor((a-Date.UTC(y,0,1))/604800000)+1)*604800000,Date.UTC(y+1,0,1));
+    else b=a+86400000;
+    b=Math.min(b,stop);
+    out.push({date:carbonDateString(a),millis:a,year:y,month:d.getUTCMonth()+1,
+      period_days:(b-a)/86400000,period_seconds:(b-a)/1000,period_start_millis:a,period_end_millis:b,
+      period_end_exclusive:carbonDateString(b),model_cadence:cadence});
+    a=b;
+  }
+  return out;
+}
+// Integrate amounts, duration-weight means, and retain missingness and source resolution.
+function aggregateWeatherPeriods(rows,periods,sourceCadence,intervalMinutes) {
+  var source=rows.map(function(r){var a=carbonDateMillis(r.date||r.month+'-01');
+    var seconds=carbonFinite(r.period_seconds)?r.period_seconds:carbonFinite(r.period_days)?r.period_days*86400:
+      sourceCadence==='monthly'?(Date.UTC(new Date(a).getUTCFullYear(),new Date(a).getUTCMonth()+1,1)-a)/1000:86400;
+    return {r:r,a:a,b:a+seconds*1000,seconds:seconds};}).sort(function(a,b){return a.a-b.a;});
+  source.forEach(function(s,i){if(!(s.seconds>0)||!isFinite(s.a)||(i&&s.a<source[i-1].b))throw new Error('Invalid or overlapping source weather periods.');});
+  return periods.map(function(period){
+    var a=period.millis,b=period.period_end_millis,seconds=period.period_seconds;
+    var parts=source.filter(function(s){return s.a<b&&s.b>a;}).map(function(s){return {s:s,w:(Math.min(b,s.b)-Math.max(a,s.a))/1000};});
+    var r=mergeParams(parts.length?parts[0].s.r:{},period),covered=parts.reduce(function(n,p){return n+p.w;},0);
+    ['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip','Rndaily'].forEach(function(k){
+      r[k]=Math.abs(covered-seconds)<0.01&&parts.every(function(p){return carbonFinite(p.s.r[k]);})?
+        parts.reduce(function(n,p){return n+p.s.r[k]*p.w/(k==='precip'?p.s.seconds:seconds);},0):null;
+    });
+    r.weather_source_cadence=sourceCadence;
+    r.weather_temporally_allocated_pct=100*parts.reduce(function(n,p){return n+(p.s.seconds>seconds?p.w:0);},0)/seconds;
+    r.weather_temporal_method=r.weather_temporally_allocated_pct?'coarser source means held constant; precipitation allocated by duration':'duration-weighted means; precipitation summed';
+    r.weather_missing_pct=100*(1-parts.reduce(function(n,p){return n+(p.s.r.complete===false||!['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip'].every(function(k){return carbonFinite(p.s.r[k]);})?0:p.w);},0)/seconds);
+    r.weather_missing_day_pct=r.weather_missing_pct;
+    if(intervalMinutes){
+      r.expected=seconds/(60*intervalMinutes);r.counts={};
+      ['ta','sw','ea','pa','rain','rn'].forEach(function(k){r.counts[k]=parts.reduce(function(n,p){return n+((p.s.r.counts&&p.s.r.counts[k])||0)*p.w/p.s.seconds;},0);});
+      r.complete=Math.abs(covered-seconds)<0.01&&parts.every(function(p){return p.s.r.complete===true;})&&
+        Object.keys(r.counts).every(function(k){return Math.abs(r.counts[k]-r.expected)<0.01;})&&
+        ['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip','Rndaily'].every(function(k){return carbonFinite(r[k]);});
+    }
+    return r;
+  });
+}
+function selectedTowerWeatherPlan(tower,start,end,cadence) {
+  if(!tower||!tower.weather||tower.weather.version!==2)throw new Error('Reprocess the source CSV/ZIP with the current importer for tower weather.');
+  var w=tower.weather,source=w.daily||w.periods||w.months,sourceCadence=w.daily?'daily':w.periods?(w.cadence||'daily'):'monthly';
+  if(!Array.isArray(source)||!source.length)throw new Error('No tower weather available.');
+  if(tower.intervalMinutes!==30&&tower.intervalMinutes!==60)throw new Error('Unsupported tower interval.');
+  var rows=aggregateWeatherPeriods(source,selectedTimestepPeriods(start,end,cadence),sourceCadence,tower.intervalMinutes);
+  var plan={cadence:cadence,records:[],segments:[],missing:[],rejected:[],byMonth:{},source:w.source||{}},segment=null;
+  rows.forEach(function(r){var valid=r.complete&&r.Tmin<=r.Tdaily&&r.Tdaily<=r.Tmax&&r.ea>=0&&r.Pdaily>0&&r.precip>=0;
+    plan.records.push({data:r,valid:valid});
+    if(valid){if(!segment){segment=[];plan.segments.push(segment);}segment.push(r);}
+    else{segment=null;plan.missing.push(r.date);plan.rejected.push(r.date+': incomplete '+cadence+' tower weather');}
+  });
+  (w.months||[]).forEach(function(r){plan.byMonth[r.month]={data:r,valid:r.complete===true};});
+  return plan;
+}
+
 function sourceCalendar(start, end, daily) {
   start = ee.Date(start); end = ee.Date(end);
   if (!daily) start = ee.Date(start.format('YYYY-MM-01'));
@@ -689,9 +753,9 @@ function alignedSatellite(geom,start,end,key,observations) {
 function assembleSelectedForcing(geom,start,end,config) {
   config=config||{};
   var key=config.weatherSource||'TERRACLIMATE', sat=config.satelliteSource||'MODIS16';
-  var cadence=config.weatherPlan?config.weatherPlan.cadence:(WEATHER_SOURCES[key].daily?'daily':'monthly');
+  var cadence=config.timestep||(config.weatherPlan?config.weatherPlan.cadence:(WEATHER_SOURCES[key].daily?'daily':'monthly'));
   var daily=cadence==='daily';
-  var cal=config.weatherPlan?ee.FeatureCollection(config.weatherPlan.records.map(function(e){return towerWeatherFeature(e.data,geom);})):sourceCalendar(start,end,daily);
+  var cal=config.weatherPlan?ee.FeatureCollection(config.weatherPlan.records.map(function(e){return towerWeatherFeature(e.data,geom);})):config.periodCalendar||sourceCalendar(start,end,daily);
   var first=ee.Date(cal.aggregate_min('millis'));
   var last=ee.Feature(cal.sort('millis',false).first());
   var lastDate=ee.Date(last.get('millis')).advance(last.getNumber('period_days').subtract(1),'day');
@@ -1864,6 +1928,7 @@ function finishACCLIM(baseline, params) {
       .cat(f.propertyNames().filter(ee.Filter.stringStartsWith('item','bucket_')))
       .cat(['date','millis','period_days','daylength','period_seconds','daylight_seconds','period_start_millis','period_end_millis','period_end_exclusive','elapsed_seconds','model_cadence','model_valid','weather_source',
         'weather_missing_pct','weather_dataset','weather_scale_m','weather_source_missing_pct','weather_gapfill_provenance',
+        'weather_source_cadence','weather_temporally_allocated_pct','weather_temporal_method','weather_missing_day_pct',
         'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_status',
         'satellite_date_basis','satellite_gap_days','satellite_left_date','satellite_right_date','satellite_max_gap_days',
         'Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','NDVI','EVI2','red','nir',
@@ -1959,7 +2024,7 @@ function attachMonthlyLST(output, geom, start, end) {
     projection.nominalScale().min(area.sqrt().divide(20).max(1)), projection.nominalScale()));
   return output.map(function(f) {
     var month = ee.Date(f.getString('date'));
-    var images = collection.filterDate(month, month.advance(1, 'month'));
+    var images = collection.filterDate(month, month.advance(f.getNumber('period_days'), 'day'));
     // A masked placeholder guarantees typed bands even outside dataset coverage.
     var empty = ee.Image.constant(0).rename('LST').updateMask(ee.Image.constant(0));
     var safe = images.merge(ee.ImageCollection.fromImages([empty]));
@@ -1970,7 +2035,7 @@ function attachMonthlyLST(output, geom, start, end) {
       crs: projection, scale: scale, maxPixels: 1e8, tileScale: 4});
     return f.set({LST: values.get('LST'), LST_valid_days: values.get('LST_valid_days'),
       LST_image_count: images.size(), LST_units: 'degrees C', LST_source: 'MODIS/061/MOD11A1 LST_Day_1km',
-      LST_sampling: 'Monthly mean of good-quality daily daytime LST; valid days averaged over AOI'});
+      LST_sampling: 'Selected-period mean of good-quality daily daytime LST; valid days averaged over AOI'});
   });
 }
 
@@ -1988,7 +2053,7 @@ function attachMonthlyAquaLST(output, geom, start, end) {
     projection.nominalScale().min(area.sqrt().divide(20).max(1)), projection.nominalScale()));
   return output.map(function(f) {
     var month = ee.Date(f.getString('date'));
-    var images = collection.filterDate(month, month.advance(1, 'month'));
+    var images = collection.filterDate(month, month.advance(f.getNumber('period_days'), 'day'));
     // A masked placeholder guarantees typed bands even outside dataset coverage.
     var empty = ee.Image.constant(0).rename('Aqua_LST').updateMask(ee.Image.constant(0));
     var safe = images.merge(ee.ImageCollection.fromImages([empty]));
@@ -1999,7 +2064,7 @@ function attachMonthlyAquaLST(output, geom, start, end) {
       crs: projection, scale: scale, maxPixels: 1e8, tileScale: 4});
     return f.set({Aqua_LST: values.get('Aqua_LST'), Aqua_LST_valid_days: values.get('Aqua_LST_valid_days'),
       Aqua_LST_image_count: images.size(), Aqua_LST_units: 'degrees C', Aqua_LST_source: 'MODIS/061/MYD11A1 LST_Day_1km',
-      Aqua_LST_sampling: 'Monthly mean of good-quality daily daytime LST; valid days averaged over AOI'});
+      Aqua_LST_sampling: 'Selected-period mean of good-quality daily daytime LST; valid days averaged over AOI'});
   });
 }
 
@@ -2067,9 +2132,10 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       });
     });
   }
-  var monthly=cfg.weatherPlan?cfg.weatherPlan.cadence==='monthly':!WEATHER_SOURCES[cfg.weatherSource||'TERRACLIMATE'].daily;
-  var first=monthly?start.slice(0,7)+'-01':start;
-  var last=monthly?carbonDateString(Date.UTC(Number(end.slice(0,4)),Number(end.slice(5,7)),1)-86400000):end;
+  cfg.timestep=cfg.timestep||(cfg.weatherPlan?cfg.weatherPlan.cadence:WEATHER_SOURCES[cfg.weatherSource||'TERRACLIMATE'].daily?'daily':'monthly');
+  var periods=selectedTimestepPeriods(start,end,cfg.timestep);
+  cfg.periodCalendar=carbonRowsToFC(periods);
+  var first=start,last=end;
   if(cfg.weatherPlan&&cfg.weatherPlan.records.length){
     first=cfg.weatherPlan.records[0].data.date||cfg.weatherPlan.records[0].data.month+'-01';
     var lastRecord=cfg.weatherPlan.records[cfg.weatherPlan.records.length-1].data;
@@ -2092,8 +2158,10 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   if(cfg.weatherPlan)satelliteBatch();
   else {
     setStatus('Sampling selected weather data...');
-    materialize(sampleWeather(geom,first,last,cfg.weatherSource||'TERRACLIMATE'),function(rows,weather) {
-      cfg.sampledWeather=weather;satelliteBatch();
+    var weatherKey=cfg.weatherSource||'TERRACLIMATE';
+    var weatherStart=WEATHER_SOURCES[weatherKey].daily?first:first.slice(0,7)+'-01';
+    materialize(sampleWeather(geom,weatherStart,last,weatherKey),function(rows) {
+      cfg.sampledWeather=carbonRowsToFC(aggregateWeatherPeriods(rows,periods,WEATHER_SOURCES[weatherKey].daily?'daily':'monthly'));satelliteBatch();
     });
   }
 }
@@ -2350,7 +2418,7 @@ function towerPeriodObservation(tower,row,start,end) {
   var a=Math.max(carbonDateMillis(row.date),carbonDateMillis(start));
   var b=Math.min(carbonDateMillis(row.date)+nativePeriodSeconds(row)*1000,carbonDateMillis(end)+86400000);
   var days=tower.daily.filter(function(d){var t=carbonDateMillis(d.date);return t>=a&&t<b;});
-  var m={sum:0,n:0,secondSum:0,secondN:0,daylight:0,leSum:0,leN:0};
+  var m={sum:0,n:0,secondSum:0,secondN:0,daylight:0,leSum:0,leN:0,total:0,unknownLight:0,absent:0};
   days.forEach(function(d){Object.keys(m).forEach(function(k){m[k]+=carbonFinite(d[k])?d[k]:0;});});
   m.gpp=m.n?m.sum/m.n:null;m.secondGpp=m.secondN?m.secondSum/m.secondN:null;
   m.leET=m.leN?m.leSum/m.leN*86400/2450000:null;
@@ -2859,7 +2927,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       result.monthly=nativeRows;
       result.monthly.forEach(function(row){var d=transpirationSourceDepth([row]);Object.keys(d).forEach(function(k){row[k]=d[k];});});
       output = carbonRowsToFC(result.monthly);
-      UI._lastOutput = carbonRowsToFC(monthlyExportRows); // monthly export; charts use native rows
+      UI._lastOutput = carbonRowsToFC(nativeRows); // selected timestep for charts and export
       UI._monthlyExportReady = true;
       var bucketInfo = {};
       var bucketRow=result.monthly.filter(function(r){return carbonFinite(r.PredGPPmean);})[0];
@@ -2911,7 +2979,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       if (carbonFinite(bucketInfo.SMmax)) {
         addSoilMoistureChart(output, geom, requestId, regionName, bucketInfo);
       }
-      c4Chart(result.monthly,monthlyExportRows);
+      c4Chart(result.monthly,null);
       if (bucketInfo.FAPAR_method_requested === 'EVI2') {
         addChartNote(ui.Label(bucketInfo.FAPAR_method === 'EVI2'
           ? 'FAPAR = EVI2 scaled between EVI2min=' + bucketInfo.FAPAR_EVI2min.toFixed(3) +
@@ -3644,6 +3712,9 @@ UI.inputPanel.add(UI.sharedFPAR);
 setupTowerImport();
 UI.weatherSelector=ui.Select({items:Object.keys(WEATHER_SOURCES).map(function(k){return {label:WEATHER_SOURCES[k].label,value:k};}),value:'TERRACLIMATE'});
 UI.satelliteSelector=ui.Select({items:Object.keys(SATELLITE_SOURCES).map(function(k){return {label:SATELLITE_SOURCES[k].label,value:k};}),value:'MODIS16'});
+UI.timestepSelector=ui.Select({items:[{label:'Daily',value:'daily'},{label:'Weekly',value:'weekly'},{label:'Monthly',value:'monthly'}],value:'monthly'});
+UI.inputPanel.add(ui.Label('Timestep (all inputs, model, charts and exports)')).add(UI.timestepSelector);
+UI.inputPanel.add(ui.Label('Weeks start January 1; end periods are clipped to selected dates. Coarser weather means are held constant and precipitation allocated by duration, with flags in the export.'));
 UI.inputPanel.add(ui.Label('Weather data (applied on Run ACCLIM)')).add(UI.weatherSelector);
 UI.inputPanel.add(ui.Label('Satellite reflectance (applied on Run ACCLIM)')).add(UI.satelliteSelector);
 UI.inputPanel.add(UI.runButton);
@@ -3909,7 +3980,7 @@ function towerWeatherFeature(row, geom) {
   return ee.Feature(geom,{date:date,millis:d.millis(),year:d.get('year'),month:d.get('month'),
     Tmin:(row.Tmin===undefined?null:row.Tmin),Tmax:(row.Tmax===undefined?null:row.Tmax),Tdaily:(row.Tdaily===undefined?null:row.Tdaily),SWRdaily:(row.SWRdaily===undefined?null:row.SWRdaily),ea:(row.ea===undefined?null:row.ea),
     Pdaily:(row.Pdaily===undefined?null:row.Pdaily),precip:(row.precip===undefined?null:row.precip),Rndaily:(row.Rndaily===undefined?null:row.Rndaily),period_days:days,period_seconds:ee.Number(days).multiply(86400),period_start_millis:d.millis(),period_end_millis:d.advance(days,'day').millis(),
-    weather_source:'tower',weather_energy_basis:'LE_CORR + H_CORR',weather_status:'complete',weather_expected_intervals:(row.expected===undefined?null:row.expected)});
+    weather_source:'tower',weather_missing_day_pct:row.weather_missing_day_pct||0,weather_source_cadence:row.weather_source_cadence||'unknown',weather_temporally_allocated_pct:row.weather_temporally_allocated_pct||0,weather_temporal_method:row.weather_temporal_method||'source values',weather_energy_basis:'LE_CORR + H_CORR',weather_status:'complete',weather_expected_intervals:(row.expected===undefined?null:row.expected)});
 }
 function towerAnnualTemperature(plan, year) {
   var sum=0,days=0,count=0;
@@ -3954,9 +4025,9 @@ function setupTowerImport() {
 function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
   var note=ui.Label({value:'Import tower data in the inputs before running ACCLIM.',style:{whiteSpace:'pre-wrap'}});
   UI._chartCard.add(note); if(!tower)return;
-  var months=towerMonthsInRange(tower,start,end);
+  var months={};
   var coverage=ui.Label({value:'',style:{whiteSpace:'pre-wrap'}});
-  var monthChoice=ui.Select({items:[],placeholder:'Monthly tower coverage',onChange:function(key){
+  var monthChoice=ui.Select({items:[],placeholder:'Tower coverage by timestep',onChange:function(key){
     var m=months[key]; if(!m)return;
     function pct(x){return x===null?'unavailable':x.toFixed(1)+'%';}
     coverage.setValue(key+': missing GPP '+pct(m.missingPct)+(tower.secondVariable?'; missing '+tower.secondVariable+' '+pct(m.secondMissingPct):'')+
@@ -3967,7 +4038,7 @@ function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
   function update(){
     var count=0,partial=[],keys=[];
     cache.rows.concat(cache.monthlyRows||[]).forEach(function(row){
-      var key=row.date.slice(0,7),m=towerPeriodObservation(tower,row,start,end);
+      var key=row.date,m=towerPeriodObservation(tower,row,start,end);months[key]=m;
       row.TowerLE_CORR_mm_day=m?m.leET:null;row.TowerLE_CORR_count=m?m.leN:null;row.TowerLE_CORR_missing_pct=m?m.leMissingPct:null;
       row.TowerGPP=m?m.gpp:null;row.TowerGPP2=m?m.secondGpp:null;row.TowerGPP_count=m?m.n:null;
       row.TowerGPP_missing_pct=m?m.missingPct:null;row.TowerGPP2_missing_pct=m?m.secondMissingPct:null;
@@ -3976,12 +4047,12 @@ function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
     monthChoice.items().reset(keys);if(keys.length)monthChoice.setValue(keys[0]);
     var mismatch=!coordinateMode||tower.latitude===null||tower.longitude===null||Math.abs(lat-tower.latitude)>0.00001||Math.abs(lon-tower.longitude)>0.00001;
     var provenance=tower.provenance||{};
-    note.setValue(tower.site+': '+count+' months with GPP; observations averaged within each model timestep. Primary: '+(tower.gppVariable||'GPP')+(tower.secondVariable?'; additional: '+tower.secondVariable:'')+
+    note.setValue(tower.site+': '+count+' periods with GPP; observations averaged within each model timestep. Primary: '+(tower.gppVariable||'GPP')+(tower.secondVariable?'; additional: '+tower.secondVariable:'')+
       '. '+(mismatch?'Verify selected location against tower coordinates. ':'')+'Whole-footprint observations; dates '+start+' through '+end+'. '+
       (partial.length?'Partial-month coverage: '+partial.join(', ')+'. Model points remain full-month estimates. ':'')+
       (provenance.citation?'Citation: '+provenance.citation+' ':'')+(provenance.productId?'Product: '+provenance.productId:''));
     UI._lastNative=carbonRowsToFC(cache.rows);
-    if(cache.monthlyRows)UI._lastOutput=carbonRowsToFC(cache.monthlyRows);
+    UI._lastOutput=carbonRowsToFC(cache.rows);
     cache.refresh.forEach(function(refresh){refresh();});
   }
   if(cache.rows)update();else cache.ready.push(update);
@@ -3989,9 +4060,9 @@ function addTowerControls(cache, tower, start, end, lat, lon, coordinateMode) {
 
 // Independent observation requests: never include model graphs in LST reductions.
 function loadThermalComparisons(cache, geom, start, end, requestId) {
-  var dates=sourceCalendar(start,end,false).select(['date']);
-  var first = ee.Date(ee.Date(start).format('YYYY-MM-01'));
-  var last = ee.Date(ee.Date(end).format('YYYY-MM-01')).advance(1, 'month');
+  var dates=carbonRowsToFC(cache.rows.map(function(r){return {date:r.date,period_days:nativePeriodSeconds(r)/86400};}));
+  var first = ee.Date(start);
+  var last = ee.Date(end).advance(1,'day');
   function load(name, field, fetch) {
     var note = ui.Label(name + ': loading observations… Model results are ready.');
     addChartNote(note);
@@ -4008,14 +4079,25 @@ function loadThermalComparisons(cache, geom, start, end, requestId) {
       var details = field === 'Landsat_LST' ? ' Valid scenes/month: ' + cache.rows.map(function(row) {
         return row.date.slice(0, 7) + ': ' + (row.Landsat_LST_scene_count || 0);
       }).join(', ') : ' Quality-screened observations.';
-      note.setValue(name + ': monthly observations; '+count+' timestamps match native model points. Quality-screened observations.');
+      note.setValue(name + ': '+UI._lastRun.timestep+' observations; '+count+' periods with quality-screened observations.');
       UI._lastNative = carbonRowsToFC(cache.rows);
-      if(cache.monthlyRows)UI._lastOutput=carbonRowsToFC(cache.monthlyRows);
+      UI._lastOutput=carbonRowsToFC(cache.rows);
       cache.refresh.forEach(function(refresh) { refresh(); });
     }
     try {
-      var observations = fetch(dates, geom, first, last);
-      observations.toList(observations.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); }).evaluate(finish);
+      var periodRows=cache.rows.map(function(r){return {date:r.date,period_days:nativePeriodSeconds(r)/86400};});
+      var offset=0,all=[];
+      function batch() {
+        if(requestId!==UI._requestId)return;
+        if(offset>=periodRows.length){finish(all);return;}
+        var subset=periodRows.slice(offset,offset+30);
+        var observations=fetch(carbonRowsToFC(subset),geom,ee.Date(subset[0].date),
+          ee.Date(subset[subset.length-1].date).advance(subset[subset.length-1].period_days,'day'));
+        observations.toList(observations.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(result,error){
+          if(error){finish(null,error);return;}all=all.concat(result||[]);offset+=subset.length;batch();
+        });
+      }
+      batch();
     } catch (error) { finish(null, error.message); }
   }
   load('Terra LST (MOD11A1)', 'LST', attachMonthlyLST);
@@ -4033,21 +4115,12 @@ UI.exportPanel = ui.Panel({
   style: { margin: '8px 0px 0px 0px' }
 });
 UI.exportCsv = ui.Button({
-  label: 'Prepare monthly CSV download',
+  label: 'Prepare CSV download (selected timestep)',
   onClick: function() { onExportCsv(); },
   style: { stretch: 'horizontal', padding: '6px',
            margin: '0px 4px 0px 0px' }
 });
 UI.exportPanel.add(UI.exportCsv);
-UI.exportDaily = ui.Button({label: 'Export daily CSV',
-  onClick: function() { onExportCarbon('daily'); }, style: {stretch: 'horizontal'}});
-UI.export16day = ui.Button({label: 'Export 16-day CSV',
-  onClick: function() { onExportCarbon('16day'); }, style: {stretch: 'horizontal'}});
-UI.exportPanel.add(UI.exportDaily);
-UI.exportPanel.add(UI.export16day);
-UI.exportPanel.add(ui.Button({label:'Export native model CSV',onClick:function(){if(UI._lastNative)prepareCsvDownload(UI._lastNative,'native');}}));
-UI.exportPanel.add(ui.Button({label:'Export annual carbon CSV',onClick:function(){if(UI._lastAnnual)prepareCsvDownload(UI._lastAnnual,'annual_carbon');}}));
-UI.exportPanel.add(ui.Button({label:'Export monthly carbon CSV',onClick:function(){if(UI._lastCarbonMonthly)prepareCsvDownload(UI._lastCarbonMonthly,'monthly_carbon');}}));
 UI.csvDownloadLink = ui.Label({value: '', style: {shown: false, color: '#1565C0'}});
 UI.exportPanel.add(UI.csvDownloadLink);
 UI.resultsPanel.add(UI.exportPanel);
@@ -4202,7 +4275,7 @@ function onRun() {
     if(UI.useTowerWeather.getValue()) {
       if(!runTower || !towerCoordinateMode || !carbonFinite(runTower.latitude) || !carbonFinite(runTower.longitude) || Math.abs(towerLat-runTower.latitude)>0.00001 || Math.abs(towerLon-runTower.longitude)>0.00001)
         throw new Error('Use the imported tower coordinates for a tower-weather run.');
-      UI._runWeatherPlan=towerWeatherPlan(runTower,startDate,endDate);
+      UI._runWeatherPlan=selectedTowerWeatherPlan(runTower,startDate,endDate,UI.timestepSelector.getValue());
       if(!UI._runWeatherPlan.segments.length){
         UI.weatherNote.setValue('Tower weather unavailable:\n'+UI._runWeatherPlan.rejected.join('\n'));
         throw new Error('No complete tower-weather periods. '+UI._runWeatherPlan.rejected.slice(0,2).join(' | ')+'. See the weather note for all periods.');
@@ -4219,15 +4292,16 @@ function onRun() {
         return;
       }
       try {
-    var runDataConfig={weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
+    var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
     runForGeometryAsync(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: UI.faparSelector.getValue() === 'FIPAR' ? 'FIPAR' : 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
     UI._lastOutput = output;
-    UI._lastRun = {start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:runDataConfig.weatherPlan?'tower':runDataConfig.weatherSource,satelliteSource:runDataConfig.satelliteSource};
+    UI._lastRun = {timestep:runDataConfig.timestep,start: startDate, end: endDate, site: regionName, regionName: regionName, weatherSource:runDataConfig.weatherPlan?'tower':runDataConfig.weatherSource,satelliteSource:runDataConfig.satelliteSource};
 
     regionName += UI._runWeatherPlan ? '\nTower weather ('+UI._runWeatherPlan.cadence+')' : '\n'+WEATHER_SOURCES[runDataConfig.weatherSource].label;
+    regionName+='\nTimestep: '+runDataConfig.timestep;
     // Center the map on the active geometry so the user sees where they ran.
     if (UI.map) UI.map.centerObject(geom);
 
@@ -4279,7 +4353,7 @@ function onRun() {
         series:{4:{lineWidth:0,pointSize:5}}
       });
     addChartNote(ui.Label(runTower&&runTower.leVariable==='LE_CORR'?
-      'Tower LE_CORR: available full-day flux mean × 86400 / 2450000 (mm/day). Includes night and negative fluxes; missing percentages are in Monthly tower coverage.':
+      'Tower LE_CORR: available full-day flux mean × 86400 / 2450000 (mm/day). Includes night and negative fluxes; missing percentages are in Tower coverage by timestep.':
       'To add tower LE_CORR, reprocess a CSV/ZIP containing LE_CORR and import the new summary.'));
 
     function addRemainingDiagnosticCharts() {
@@ -4394,10 +4468,10 @@ function onExportCarbon(cadence) {
 
 function onExportCsv() {
   if (!UI._lastOutput || !UI._lastRun || !UI._monthlyExportReady) {
-    setStatus('Run the model and wait for monthly results before exporting.');
+    setStatus('Run the model and wait for results before exporting.');
     return;
   }
-  prepareCsvDownload(UI._lastOutput, 'monthly');
+  prepareCsvDownload(UI._lastOutput, UI._lastRun.timestep||'monthly');
 }
 
 

@@ -2,15 +2,17 @@
 
 The [browser importer](https://kevinptu.github.io/ACCLIM/tower-csv-importer.html) accepts Quanterra CSVs and FLUXNET FLUXMET/FULLSET/SUBSET HH/HR CSVs or ZIP packages. Use the official Shuttle download website linked there, select the downloaded ZIP, review fields, then copy the prepared summary into ACCLIM. CSV/ZIP processing runs locally in a browser worker. There is no upload, server-side storage, or automatic download from the importer. “Save summary JSON” explicitly saves a local file.
 
+The importer preserves daily data. Choose **Timestep: Daily / Weekly / Monthly** in ACCLIM to control weather, satellite inputs, tower comparisons, model calculations, charts, and exports together. Changing this app setting does not require reprocessing the CSV/ZIP.
+
 ## Calculation and missing data
 
 - Use all finite GPP when the chosen incoming-shortwave variable is greater than zero. No quality or missing-percentage cutoff is applied. Keep negative and gap-filled GPP values.
-- Monthly missing GPP percentage is `100 × (daylight records − valid GPP records) / daylight records`, separately for each GPP method. A month with no valid GPP has a blank mean, not zero; known daylight with all missing GPP reports 100%.
+- Selected-period missing GPP percentage is `100 × (daylight records − valid GPP records) / daylight records`, separately for each GPP method. A period with no valid GPP has a blank mean, not zero; known daylight with all missing GPP reports 100%.
 - Records with missing radiation cannot be classified as daytime. Report their percentage separately, with all supplied records as denominator. Entire absent timestamps are counted separately between file bounds. Neither is silently treated as night or included in the known-daylight denominator.
 - Means pool subdaily observations; they are not unweighted averages of daily means. Daily sums/counts retain enough information to recalculate after an inclusive date override in ACCLIM.
 - Support uniform 30- or 60-minute intervals. Reject duplicate/out-of-order timestamps, mixed interval lengths, and daily-only inputs. Compute local midpoint from interval start/end; preserve the source local clock without DST or UTC conversion.
 - Recognize blanks, nonfinite values, -999, and FLUXNET -9999/-9999.0/-9999.9 variants. Report radiation and NEE QC distributions as supplied; NEE QC is not a direct GPP gap-filling flag. Consult the source package for flag meanings.
-- Default to GPP_NT_VUT_REF with GPP_DT_VUT_REF as an additional estimate where available. Both are daytime averages here; NT/DT refer to partitioning methods. CUT fields can be explicitly selected. Do not silently substitute missing methods.
+- Default to GPP_DT_VUT_REF with GPP_NT_CUT_REF as an additional estimate where available. Both are daytime averages here; NT/DT refer to partitioning methods. CUT fields can be explicitly selected. Do not silently substitute missing methods.
 - Subdaily FLUXNET GPP fields use µmol CO₂ m⁻² s⁻¹. Daily/monthly aggregated products are not substitutes for daytime means.
 
 The importer reads site coordinates from matching BIF/BADM rows or an optional Shuttle snapshot. Missing metadata can be entered manually. Citation/product ID may require the Shuttle snapshot or manual entry; the source license/readme remains in the downloaded archive. Retain the dataset citation, DOI, and required acknowledgments for downstream use. Archive members are read in memory, never extracted to filesystem paths. Large files require sufficient browser memory (600 MB compressed input; 1.2 GB selected CSV). The hosted page is the supported browser entry point; opening the HTML directly with `file://` can block its worker.

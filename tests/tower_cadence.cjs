@@ -18,6 +18,8 @@ for(const dates of [['0002-01-01','2024-12-31'],['2024-02-30','2024-03-01'],['20
  assert.throws(()=>weather.periods(poison,'daily',...dates,30),e=>!e.message.includes('allocation must not start'));
 }
 assert.throws(()=>core.transferSummary(data,'2023-01-01','2024-12-31','daily'),/within the loaded record/);
+const defaultCopy=core.transferSummary({...restored,weather:{...restored.weather,cadence:'weekly'}},'2024-01-01','2024-12-31');
+assert.equal(defaultCopy.weather.cadence,'daily');assert.equal(defaultCopy.weather.periods.length,366);
 const transfers={};
 for(const cadence of ['daily','weekly','monthly']){
  const transfer=core.transferSummary(restored,'2024-01-01','2024-12-31',cadence);transfers[cadence]=transfer;
@@ -52,7 +54,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  const monthly=c.aggregateModelMonths(rows);assert.equal(monthly.length,2);assert.equal(monthly[0].precip,3);assert.equal(monthly[1].precip,4);
  const observation=c.towerPeriodObservation(data,rows[0],'2024-01-29','2024-02-04');assert.equal(observation.n,7*24);assert.equal(observation.leN,7*48);
  assert(s.includes('result.monthly=nativeRows;'));assert(s.includes('nativeNPPChartRows(nativeRows,products.daily)'));
- assert(!s.includes('UI._lastOutput=carbonRowsToFC(cache.rows)'));
+ assert(s.includes('UI._lastOutput=carbonRowsToFC(cache.rows)')); // Export uses the selected model timestep.
 }
 if(process.argv[2])fs.writeFileSync(process.argv[2],JSON.stringify(data));
 console.log('PASS daily weather persistence, three cadences, leap/year/week boundaries, missing periods, legacy monthly compatibility, native chart cadence and observation aggregation');

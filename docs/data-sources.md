@@ -1,6 +1,10 @@
 # Weather, reflectance, and temporal processing
 
-The weather selector controls model cadence: TerraClimate runs monthly; ERA5-Land and GRIDMET run daily. Satellite cadence does not determine the model timestep. Charts retain the native model timestep, including GPP, NPP, water fluxes, soil moisture, physiology and biomass production. Tower observations are averaged from their daily record statistics over each model interval. The monthly and 16-day CSVs remain explicit reporting products; they do not set chart cadence.
+The app's single **Timestep** selector (Daily / Weekly / Monthly; default Monthly) controls weather aggregation, satellite aggregation, tower weather and flux comparisons, model calculations, every model-run chart (including thermal comparisons), and the CSV download. Choose a timestep, then Run ACCLIM. The importer preserves daily tower records and has no timestep selector. Standalone soil-reference and LST–NDVI analyses retain their separate analysis calendars.
+
+Weekly blocks are anchored to January 1; the last block ends at the year boundary. Weeks and months at the selected date-range edges are clipped to the requested dates. All sources use exactly these intervals. Temperature, vapor pressure, pressure, and radiation are duration-weighted means; precipitation is summed. Satellite observations retain their existing date/QA/interpolation rules before being averaged over each selected interval. Daytime tower GPP and full-day LE_CORR means pool valid source-record sums/counts, with missing percentages retained; they are not unweighted averages of daily means.
+
+A coarser weather source is not presented as new daily observations: its means are held constant within the original source interval and precipitation is allocated in proportion to overlap duration. This preserves totals while imposing no new weather variability. Exports record `weather_source_cadence`, `weather_temporally_allocated_pct`, and `weather_temporal_method`. Reprocessing an older monthly-only tower JSON from its original CSV/ZIP recovers daily weather; otherwise the same explicitly flagged coarse-source allocation applies.
 
 ## Weather variables
 
@@ -30,7 +34,7 @@ MOD13 pixels are assigned their `DayOfYear` observation date before spatial redu
 
 Paired red and NIR are interpolated linearly between valid dates. NDVI and EVI2 are then derived, and the existing albedo proxy `(red + nir)/2` is retained. Maximum bracketing spans are configurable in `SATELLITE_SOURCES`: 32 days for daily/HLS/8-day, 48 days for 16-day, 64 days for 32-day. No one-sided extrapolation is used. Observations outside the requested window are retrieved for bracketing. These are research settings, not guarantees of actual observation frequency.
 
-Monthly TerraClimate inputs use means of the aligned daily satellite series. A month requires supported vegetation values for all its days. Thermal products and thermal comparison methods are unchanged.
+Monthly TerraClimate inputs use means of the aligned daily satellite series. A month requires supported vegetation values for all its days. Thermal products and thermal comparisons use the same selected intervals.
 
 ## Bucket-only gap filling
 
@@ -38,7 +42,7 @@ Bucket precipitation is normalized to mm/second before interpolation, then conve
 
 The bucket continues through interpolated periods without resetting storage. Interpolated periods update storage but are excluded from the capacity-fitting objective. Capacity fitting retains the duration-weighted objective (seconds) and full initial bucket, with at least 365 contiguous represented days. The separate ET-effective bucket remains a diagnostic fitted to the original humidity-constrained ET reference.
 
-Interpolated bucket inputs do not create GPP, NPP, temperatures, or other physiological model outputs for missing forcing periods. Acclimation advances by elapsed time between usable physiological periods. Tower weather remains monthly and never substitutes gridded weather; valid supplied precipitation can still support a bucket even when another tower weather field is unavailable.
+Interpolated bucket inputs do not create GPP, NPP, temperatures, or other physiological model outputs for missing forcing periods. Acclimation advances by elapsed time between usable physiological periods. Tower weather uses the selected timestep and never substitutes gridded weather; valid supplied precipitation can still support a bucket even when another tower weather field is unavailable.
 
 ## Flags and exports
 
@@ -52,7 +56,7 @@ Interpolated bucket inputs do not create GPP, NPP, temperatures, or other physio
 * `bucket_record_missing_pct`: period-duration-weighted percentage of the complete requested record with missing bucket forcing before interpolation.
 * `bucket_forcing_status`: supplied, interpolated, or unavailable. Supplied includes the source product's own gap-filled values.
 
-Native model CSV exports all native model periods and their diagnostics. Daily CSV combines native daily model diagnostics and carbon products for daily weather; for monthly weather it allocates native monthly carbon totals uniformly over their represented days, labeled `allocated_from_weather_period`. This preserves monthly mass; it does not reconstruct daily physiology or interpolate between months. Monthly model charts/CSV use daylight-duration-weighted daytime flux means for daily runs, and sum precipitation over represented days. Monthly and annual carbon CSVs include complete totals, separately labeled available-period sums, requested days, missing percentages, and calendar coverage percentages. Missing days never contribute fabricated zero carbon.
+The CSV download contains one row per selected model interval, including interval timestamps, seconds, rate variables and integrated carbon/water amounts. Charts use these same rows. Annual GPP/NPP totals remain summary annotations; internal daily allocations support totals but do not create a competing chart/export cadence. Missing data never contribute fabricated zero carbon.
 
 Daily GPP mass = mean daytime GPP × daylength × 3600 × 12×10⁻⁶, in gC/m²/day. Monthly and annual carbon totals sum daily masses; NPP retains the configured CUE and cover allocation. No daily physiology is reconstructed from monthly values when a daily weather source is selected.
 
@@ -71,7 +75,7 @@ The interactive app samples satellite data in bounded batches and materializes w
 
 ## Shared equations and timestep duration
 
-The weather adapter defines each model interval. All sources use the same physiological and bucket equations; TerraClimate supplies monthly intervals and ERA5-Land/GRIDMET supply daily intervals. Satellite reflectances are aligned using the interpolation rules above.
+The app Timestep selection defines each model interval. All sources use the same physiological and bucket equations after aggregation to that interval. Satellite reflectances are aligned using the interpolation rules above.
 
 Each row carries `period_seconds`, `daylight_seconds`, interval start/end timestamps, and `elapsed_seconds`. Daylight seconds sum astronomical daylight across the interval; monthly daylength is the mean across its days. Daytime radiation and PAR are converted using `period_seconds / daylight_seconds`.
 
@@ -84,19 +88,13 @@ Initialization uses a fixed five-day window rather than five records. Daily inpu
 
 Daily and monthly predictions need not be identical: evaluating nonlinear equations with monthly mean weather differs from aggregating daily evaluations. The shared duration contract removes inconsistent unit conversions, not this aggregation effect. Subdaily weather ingestion is not yet offered in the interface.
 
-## Selectable tower-weather timesteps
+## Tower data and the shared timestep
 
-The importer retains full-day daily meteorology from the supplied half-hourly/hourly CSV. After preparing a comparison, choose **Tower weather timestep**: daily (default for newly processed data), weekly, or monthly. The copy payload passes that cadence to ACCLIM. **Use Tower Weather Data** remains optional; when enabled, its chosen cadence overrides the gridded-weather selector.
+The importer retains full-day daily meteorology and daytime GPP/full-day LE_CORR sums and counts from the supplied half-hourly/hourly CSV. Copy and saved JSON retain these daily values so changing Timestep in ACCLIM does not require reparsing the source. The optional **Use Tower Weather Data** setting chooses the weather source, not the timestep. When it is off, tower flux comparisons still use the same intervals as the gridded-weather model.
 
-Daily temperature extrema come from each day's supplied records. Weekly/monthly Tmin and Tmax are means of daily extrema; mean temperature, shortwave, actual vapor pressure, pressure and LE_CORR + H_CORR are full-day means. Precipitation is summed. Weekly blocks start January 1, span seven days, and end at December 31 with a shorter final block. Boundary weeks/months retain their full calendar period even when the selected comparison begins inside it; carbon reporting is restricted to the requested dates.
+Daily Tmin/Tmax come from source records; weekly/monthly extrema inputs are means of daily extrema. Required tower weather fields must be complete for the selected period; incomplete periods remain unavailable and existing bucket-only bridging applies. Missing GPP or LE_CORR does not suppress averages of available flux observations; coverage is reported for each selected interval.
 
-Every required weather variable must have all expected source intervals within a model period. Missing or absent days make the affected period unavailable. Supplied gap-filled fields remain preferred; no gridded substitute is introduced. Existing bucket-only bridging still applies, without inventing missing carbon predictions.
-
-Saved JSON retains daily weather and monthly quality/context summaries, regardless of the selected transfer cadence. To use daily or weekly weather with an older monthly-only JSON, process the original CSV/ZIP again through the standard importer. Changing the selector thereafter does not require parsing the CSV again.
-
-The daily copy payload is larger and the model performs more updates. In a synthetic one-year fixture, complete transfers were approximately 148 KB daily, 70 KB weekly and 59 KB monthly (including tower GPP statistics). A one-month Earth Engine smoke test took approximately 7 seconds daily and 4 seconds weekly/monthly; these are illustrative, not performance guarantees.
-
-NPP charts show mean daily carbon flux at each native weather period. Biomass production charts similarly show mean lb dry matter/acre/day; cumulative aboveground production is the end-of-period accumulation. Their source daily allocations, annual totals, and explicit 16-day CSV remain available. Monthly model exports from weekly runs allocate interval totals by calendar-day overlap rather than rerunning monthly physiology.
+Saved JSON also retains monthly quality/context summaries used for annual context. These do not determine model or chart cadence. The importer preview is a record overview; the app performs the selected aggregation.
 
 ## Standalone LST versus NDVI
 
