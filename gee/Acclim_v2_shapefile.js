@@ -19,6 +19,8 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
+  fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
+  FAPARexp:       0.5,      // Seasonal FAPAR / running seasonal maximum exponent
   faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
@@ -61,7 +63,7 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  ndvi_min: 0, // Low-level default; web runs use the fitted NDVI intercept at GE=0.
+  ndvi_min: 0, // Used unless the GE=0 NDVImin option is selected.
   ndvi_max: 0.95,
   ndvi_exp: 1
 };
@@ -797,7 +799,7 @@ function assembleSelectedForcing(geom,start,end,config) {
     var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(valid.size().eq(days)).and(dl.gt(0));
     if(config.weatherPlan)complete=complete.and(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('tower_weather_valid'),null),0,wf.get('tower_weather_valid'))).eq(1));
     return f.setGeometry(geom).set(wf.toDictionary()).set(props).set({
-      daylength:dl,daylight_seconds:dl.multiply(3600).multiply(days),
+      latitude:lat,daylength:dl,daylight_seconds:dl.multiply(3600).multiply(days),
       doy:doyFromDate(ee.Date(t)),dt:days,ca_daily:co2ForDate(ee.Date(t)),
       model_cadence:cadence,weather_source:config.weatherPlan?'tower':key,
       model_valid:complete,weather_missing_pct:ee.Number(7).subtract(wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip']).size()).multiply(100/7),
@@ -1208,8 +1210,10 @@ function computeDiagnostics(running, instant, params) {
   // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean
   // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
   var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
-  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD);
-  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD);
+  var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
+  var FAPARmax=ee.Number(ee.Algorithms.If(instant.contains('FAPARmax'),instant.get('FAPARmax'),FAPAR));
+  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
+  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
 
   // Mean daytime GPP
   var GPPday_mean_C3 = GPPmax_C3.multiply(p.GPPmean2GPPmax);
@@ -1306,6 +1310,7 @@ function computeDiagnostics(running, instant, params) {
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR,
+    FAPARmax: FAPARmax, fM: fM, FAPARexp: p.FAPARexp,
     FIPAR:            FIPAR,
     FPAR_mode: p.useSharedFPAR ? 'shared FAPAR' : 'separate FAPAR/FIPAR',
     GPPmax_C3:        GPPmax_C3,
@@ -1333,6 +1338,18 @@ function computeDiagnostics(running, instant, params) {
  * Updates running means conditionally on PARday >= 10, computes diagnostics,
  * appends a feature to history.
  */
+// Reset in the period containing Jan 1 (north/equator) or DOY 182 (south).
+// Missing periods retain no invented peaks; first valid period seeds each season.
+function seasonalFAPARState(fapar,latitude,periodEnd,state,p) {
+  var end=ee.Date(periodEnd).advance(-1,'second'),year=ee.Number(end.get('year'));
+  var doy=ee.Number(end.getRelative('day','year')).add(1);
+  var season=year.subtract(ee.Number(latitude).lt(0).and(doy.lt(182)));
+  var reset=ee.Number(state.get('step')).eq(0).or(season.neq(ee.Number(ee.Algorithms.If(state.contains('FAPAR_season'),state.get('FAPAR_season'),season))));
+  var previous=ee.Number(ee.Algorithms.If(state.contains('FAPARmax'),state.get('FAPARmax'),fapar));
+  var maximum=ee.Number(ee.Algorithms.If(reset,fapar,previous.max(fapar)));
+  var ratio=ee.Number(ee.Algorithms.If(maximum.gt(0),ee.Number(fapar).divide(ee.Number(ee.Algorithms.If(maximum.gt(0),maximum,1))),0));
+  return ee.Dictionary({FAPARmax:maximum,fM:ratio.pow(p.FAPARexp),FAPAR_season:season,FAPARmax_reset:reset});
+}
 function acclimStep(currentFeat, prevState, params) {
   var state = ee.Dictionary(prevState);
   var f = ee.Feature(currentFeat);
@@ -1415,6 +1432,10 @@ function acclimStep(currentFeat, prevState, params) {
   });
   var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR')});
 
+  var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
+    f.geometry().centroid(1).coordinates().get(1)));
+  var seasonal=seasonalFAPARState(photosyntheticFAPAR(instant,p),latitude,f.getNumber('period_end_millis'),state,p);
+  instant=instant.combine(seasonal);
   var diag = computeDiagnostics(runningNow, instant, p);
 
   // Output feature: forcings + instantaneous + running means + diagnostics
@@ -1422,6 +1443,7 @@ function acclimStep(currentFeat, prevState, params) {
     date: f.getString('date'),
     millis: f.getNumber('millis'),
     doy: doy,
+    latitude:latitude,FAPAR_season:seasonal.get('FAPAR_season'),FAPARmax_reset:seasonal.get('FAPARmax_reset'),
     // Forcings (carried through for reference)
     weather_source: f.get('weather_source'), weather_status: f.get('weather_status'),
     weather_energy_basis: f.get('weather_energy_basis'), weather_expected_intervals: f.get('weather_expected_intervals'), ea: f.get('ea'),
@@ -1458,6 +1480,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean,
     dt: dt,
+    FAPARmax:seasonal.get('FAPARmax'),FAPAR_season:seasonal.get('FAPAR_season'),
     step: step.add(1),
     history: ee.List(state.get('history')).add(outFeat)
   });
@@ -1896,6 +1919,7 @@ function runACCLIM(forcingFC, params) {
       (!isFinite(p.EVI2min) || !isFinite(p.EVI2max) || p.EVI2max <= p.EVI2min)) {
     throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
   }
+  if(typeof p.FAPARexp!=='number'||!isFinite(p.FAPARexp)||p.FAPARexp<0)throw new Error('FAPARexp must be finite and nonnegative.');
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
@@ -2111,10 +2135,10 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   function complete(rows){
     var byDate={};gePeriods.forEach(function(r){byDate[r.date]=r;});
     var spec=geSourceSpec(cfg.satelliteSource||'MODIS16');
-    var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{});
-      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source='NDVI at GE=0';
-      d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
-      d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;
+    var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0});
+      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitNDVIminGE?'NDVI at GE=0':'configured';
+      if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
+        d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;}
       d.GE_source=spec.label;d.GE_scale_m=spec.scale;d.GE_status=carbonFinite(d.GE)?'available':'unavailable';return d;
     });
     done(ee.FeatureCollection(enriched.map(function(r){return ee.Feature(geom,r);})).sort('millis'));
@@ -2187,11 +2211,12 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   }
   fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
     if(request!==UI._requestId)return;
-    if(error){done(null,error);return;}
+    if(error&&params.fitNDVIminGE){done(null,error);return;}
     try{
-      ndviFit=ndviMinGEFit(diagnostic,params);gePeriods=diagnostic;
-      params.ndvi_min=ndviFit.intercept;cfg.modelParams=params;
-      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+' from NDVI at GE=0; preparing model inputs...');
+      gePeriods=diagnostic||[];
+      if(params.fitNDVIminGE){ndviFit=ndviMinGEFit(gePeriods,params);params.ndvi_min=ndviFit.intercept;}
+      cfg.modelParams=params;
+      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+(params.fitNDVIminGE?' from GE=0':' (configured)')+'; preparing model inputs...');
       startInputs();
     }catch(error){done(null,error.message);}
   });
@@ -2969,7 +2994,7 @@ function fetchGEPeriods(geom,start,end,key,periods,requestId,done) {
     try {
       if(cursor>stop){done(aggregateGEDiagnostics(all,periods,spec.gap));return;}
       var next=Math.min(cursor+32*86400000,stop+86400000);
-      setStatus('Estimating NDVImin from GE: '+carbonDateString(cursor)+' to '+carbonDateString(next-86400000)+'...');
+      setStatus('Sampling GE/vegetation-index pairs: '+carbonDateString(cursor)+' to '+carbonDateString(next-86400000)+'...');
       var sample=sampleGEDiagnostics(geom,carbonDateString(cursor),carbonDateString(next-86400000),key);
       sample.toList(sample.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(result,error){
         if(requestId!==UI._requestId)return;
@@ -2993,7 +3018,7 @@ function addGEComparison(rows,geom,start,end,requestId,regionName,key) {
     var f=geLinearFit(rows,k),label=k.replace('_GE','');
     return f?label+' at GE=0: '+f.intercept.toFixed(4)+'; R²='+(f.r2===null?'undefined':f.r2.toFixed(3))+'; n='+f.n+(f.extrapolated?' (extrapolated)':''):label+': insufficient GE variation for a fit';
   });
-  var applied=rows.length&&carbonFinite(rows[0].ndvi_min_used)?'Applied NDVImin = '+rows[0].ndvi_min_used.toFixed(4)+' for this run.':'NDVImin fit unavailable.';
+  var applied=rows.length&&carbonFinite(rows[0].ndvi_min_used)?'Applied NDVImin = '+rows[0].ndvi_min_used.toFixed(4)+' ('+rows[0].ndvi_min_source+') for this run.':'NDVImin unavailable.';
   addChartNote(ui.Label({value:spec.label+'; matched pixels and dates at the selected timestep.\n'+fits.join('\n')+'\n'+applied+' EVI2min is unchanged.',style:{whiteSpace:'pre-wrap'}}));
 
 }
@@ -3844,6 +3869,7 @@ UI.runButton = ui.Button({
 
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
+  {label: 'FAPAR = FIPAR; NDVImin fitted at GE = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
   {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'FIPAR',
@@ -4436,7 +4462,7 @@ function onRun() {
       }
       try {
     var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), faparMethod: UI.faparSelector.getValue() === 'FIPAR' ? 'FIPAR' : 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2', fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
