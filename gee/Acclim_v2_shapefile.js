@@ -61,9 +61,9 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  ndvi_min: 0,
-  ndvi_max: 1,
-  ndvi_exp: 1.6
+  ndvi_min: 0, // Low-level default; web runs use the fitted NDVI intercept at GE=0.
+  ndvi_max: 0.95,
+  ndvi_exp: 1
 };
 
 var DATASETS = {
@@ -693,7 +693,7 @@ function satelliteImages(geom,start,end,key) {
         }
       }
       mask=mask.and(red.gte(0)).and(nir.gte(0)).and(red.lte(1)).and(nir.lte(1)).and(red.add(nir).gt(0));
-      // GE is a diagnostic only: missing RGB must not mask the model's red/NIR.
+      // Keep the RGB mask separate from model red/NIR; fit the GE baseline before the run.
       var ge=ee.Image.constant(0).rename('GE').updateMask(ee.Image.constant(0));
       if(green&&blue)ge=green.multiply(2).subtract(red).subtract(blue).rename('GE')
         .updateMask(green.gte(0).and(green.lte(1)).and(blue.gte(0)).and(blue.lte(1)));
@@ -776,7 +776,7 @@ function assembleSelectedForcing(geom,start,end,config) {
         weather_gapfill_provenance:'supplied tower gap-filled fields retained; coverage refers to supplied records'});
     }));
   } else weather=config.sampledWeather||sampleWeather(geom,first,lastDate,key);
-  var satellite=config.alignedSatellite||alignedSatellite(geom,first,lastDate,sat,config.sampledSatellite), p=ACCLIM_PARAMS;
+  var satellite=config.alignedSatellite||alignedSatellite(geom,first,lastDate,sat,config.sampledSatellite), p=mergeParams(ACCLIM_PARAMS,config.modelParams||{});
   var lat=ee.Number(geom.centroid({maxError:1}).coordinates().get(1));
   var raw=cal.map(function(f) {
     var t=f.getNumber('millis'), days=f.getNumber('period_days');
@@ -2106,6 +2106,19 @@ function attachLandsatLST(output, geom, start, end) {
 
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
+  params=mergeParams(ACCLIM_PARAMS,params||{});
+  var gePeriods=[],ndviFit;
+  function complete(rows){
+    var byDate={};gePeriods.forEach(function(r){byDate[r.date]=r;});
+    var spec=geSourceSpec(cfg.satelliteSource||'MODIS16');
+    var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{});
+      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source='NDVI at GE=0';
+      d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
+      d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;
+      d.GE_source=spec.label;d.GE_scale_m=spec.scale;d.GE_status=carbonFinite(d.GE)?'available':'unavailable';return d;
+    });
+    done(ee.FeatureCollection(enriched.map(function(r){return ee.Feature(geom,r);})).sort('millis'));
+  }
   function materialize(fc,next) {
     fc.toList(fc.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(rows,error) {
       if(request!==UI._requestId)return;
@@ -2117,7 +2130,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   function simulate() {
     setStatus('Aligning satellite observations with weather timesteps...');
     materialize(assembleSelectedForcing(geom,start,end,cfg),function(rows,forcing) {
-      if(!rows.some(function(r){return r.model_valid===1||r.model_valid===true;})){done(forcing);return;}
+      if(!rows.some(function(r){return r.model_valid===1||r.model_valid===true;})){complete(rows);return;}
       setStatus('Calculating native '+rows[0].model_cadence+' physiology...');
       materialize(runACCLIM(forcing,mergeParams(params,{deferBuckets:true})),function(baselineRows,baseline) {
         setStatus('Fitting soil-water buckets and bridging missing forcing...');
@@ -2125,7 +2138,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
         var fittedRows=fitNativeBuckets(baselineRows,params), finalRows=[], offset=0;
         function finishBatch() {
           if(request!==UI._requestId)return;
-          if(offset>=fittedRows.length){done(ee.FeatureCollection(finalRows.map(function(r){return ee.Feature(geom,r);})).sort('millis'));return;}
+          if(offset>=fittedRows.length){complete(finalRows);return;}
           var endOffset=Math.min(offset+90,fittedRows.length);
           setStatus('Calculating final flux diagnostics: '+(offset+1)+'–'+endOffset+' of '+fittedRows.length+' periods...');
           var fitted=ee.FeatureCollection(fittedRows.slice(offset,endOffset).map(function(r){return ee.Feature(geom,r);}));
@@ -2161,6 +2174,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       sampled=sampled.concat(rows);cursor=next;satelliteBatch();
     });
   }
+  function startInputs(){
   if(cfg.weatherPlan)satelliteBatch();
   else {
     setStatus('Sampling selected weather data...');
@@ -2170,6 +2184,17 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       cfg.sampledWeather=carbonRowsToFC(aggregateWeatherPeriods(rows,periods,WEATHER_SOURCES[weatherKey].daily?'daily':'monthly'));satelliteBatch();
     });
   }
+  }
+  fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
+    if(request!==UI._requestId)return;
+    if(error){done(null,error);return;}
+    try{
+      ndviFit=ndviMinGEFit(diagnostic,params);gePeriods=diagnostic;
+      params.ndvi_min=ndviFit.intercept;cfg.modelParams=params;
+      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+' from NDVI at GE=0; preparing model inputs...');
+      startInputs();
+    }catch(error){done(null,error.message);}
+  });
 }
 
 function runForGeometry(geom, startDate, endDate, paramOverrides, config) {
@@ -2851,7 +2876,7 @@ function annualClimateNote(rows, start, end, variable) {
   return (variable === 'Tdaily' ? 'Mean annual air temperature (24-hour): ' : 'Annual precipitation: ') + values.join('; ');
 }
 
-// Independent matched-pixel diagnostics; never substitute 500 m values into model forcing.
+// Matched-pixel baseline fit; retain the selected model reflectance source.
 function geSourceSpec(key) {
   var s=SATELLITE_SOURCES[key];
   if(key.indexOf('MODIS')===0){var daily=key==='MODIS1';return {modis:true,daily:daily,scale:500,gap:32,
@@ -2929,6 +2954,33 @@ function geLinearFit(rows,field) {
   return {n:n,slope:xy/xx,intercept:y-xy/xx*x,r2:yy>0?xy*xy/(xx*yy):null,
     extrapolated:pairs.every(function(r){return r.GE>0;})||pairs.every(function(r){return r.GE<0;})};
 }
+function ndviMinGEFit(diagnostic,params) {
+  var fit=geLinearFit(diagnostic,'NDVI_GE');
+  if(!fit)throw new Error('Cannot estimate NDVImin at GE=0: at least three valid timestep pairs with varying GE are required. Choose a longer date range or a different timestep/source.');
+  if(!carbonFinite(fit.intercept)||fit.intercept < -1||fit.intercept > 1||fit.intercept>=params.ndvi_max)
+    throw new Error('NDVI at GE=0 ('+fit.intercept+') is outside [-1,1] or is not below NDVImax ('+params.ndvi_max+'). NDVImin was not applied.');
+  return fit;
+}
+function fetchGEPeriods(geom,start,end,key,periods,requestId,done) {
+  var spec=geSourceSpec(key),cursor=carbonDateMillis(start)-(spec.gap+32)*86400000;
+  var stop=carbonDateMillis(end)+(spec.gap+32)*86400000,all=[];
+  function batch(){
+    if(requestId!==UI._requestId)return;
+    try {
+      if(cursor>stop){done(aggregateGEDiagnostics(all,periods,spec.gap));return;}
+      var next=Math.min(cursor+32*86400000,stop+86400000);
+      setStatus('Estimating NDVImin from GE: '+carbonDateString(cursor)+' to '+carbonDateString(next-86400000)+'...');
+      var sample=sampleGEDiagnostics(geom,carbonDateString(cursor),carbonDateString(next-86400000),key);
+      sample.toList(sample.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(result,error){
+        if(requestId!==UI._requestId)return;
+        if(error){done(null,'NDVImin estimation failed: '+error);return;}
+        all=all.concat(result||[]);cursor=next;batch();
+      });
+    }catch(error){done(null,error.message);}
+  }
+  batch();
+}
+
 function addGEComparison(rows,geom,start,end,requestId,regionName,key) {
   function chart(data){return ui.Chart({cols:[{label:'GE',type:'number'},{label:'EVI2',type:'number'},{label:'NDVI',type:'number'}],
     rows:data.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r.EVI2_GE)&&carbonFinite(r.NDVI_GE);}).map(function(r){return {c:[{v:r.GE},{v:r.EVI2_GE},{v:r.NDVI_GE}]};})})
@@ -2936,31 +2988,14 @@ function addGEComparison(rows,geom,start,end,requestId,regionName,key) {
       hAxis:{title:'Green excess: 2 × G − R − B'},vAxis:{title:'Vegetation index'},legend:{position:'top'},
       colors:['#8E24AA','#2E7D32'],pointSize:3,lineWidth:0,
       trendlines:{0:{type:'linear',color:'#8E24AA',lineWidth:1,visibleInLegend:false},1:{type:'linear',color:'#2E7D32',lineWidth:1,visibleInLegend:false}}});}
-  rows.forEach(function(r){r.GE=null;r.EVI2_GE=null;r.NDVI_GE=null;r.GE_available_pct=0;r.GE_status='loading';});
-  UI._lastNative=carbonRowsToFC(rows);UI._lastOutput=carbonRowsToFC(rows);
-  addResultChart(chart([]));var replace=chartReplacer(),spec=geSourceSpec(key);
-  var note=ui.Label({value:'Loading matched reflectance: '+spec.label,style:{whiteSpace:'pre-wrap'}});addChartNote(note);
-  var cursor=carbonDateMillis(start)-(spec.gap+32)*86400000,stop=carbonDateMillis(end)+(spec.gap+32)*86400000,all=[];
-  function batch(){
-    if(requestId!==UI._requestId)return;
-    if(cursor>stop){
-      var diagnostic=aggregateGEDiagnostics(all,rows,spec.gap);
-      diagnostic.forEach(function(d,i){Object.keys(d).forEach(function(k){if(k!=='date')rows[i][k]=d[k];});rows[i].GE_source=spec.label;rows[i].GE_scale_m=spec.scale;rows[i].GE_status=carbonFinite(d.GE)?'available':'unavailable';});
-      replace(chart(diagnostic));
-      var fits=['EVI2_GE','NDVI_GE'].map(function(k){var f=geLinearFit(diagnostic,k),label=k.replace('_GE','');
-        return f?label+' at GE=0: '+f.intercept.toFixed(4)+'; R²='+(f.r2===null?'undefined':f.r2.toFixed(3))+'; n='+f.n+(f.extrapolated?' (extrapolated)':''):label+': insufficient GE variation for a fit';});
-      note.setValue(spec.label+'; '+diagnostic.filter(function(r){return carbonFinite(r.GE);}).length+'/'+rows.length+' periods with matched pixels and dates, aggregated to the selected timestep.\n'+fits.join('\n')+'\nIntercepts are exploratory baseline diagnostics; GE=0 does not by itself establish bare soil. No model parameter is changed.');
-      UI._lastNative=carbonRowsToFC(rows);UI._lastOutput=carbonRowsToFC(rows);return;
-    }
-    var next=Math.min(cursor+32*86400000,stop+86400000);
-    var sample=sampleGEDiagnostics(geom,carbonDateString(cursor),carbonDateString(next-86400000),key);
-    sample.toList(sample.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(result,error){
-      if(requestId!==UI._requestId)return;
-      if(error){rows.forEach(function(r){r.GE_status='unavailable';});UI._lastNative=carbonRowsToFC(rows);UI._lastOutput=carbonRowsToFC(rows);note.setValue('GE comparison unavailable: '+error);return;}
-      all=all.concat(result||[]);cursor=next;batch();
-    });
-  }
-  try{batch();}catch(error){note.setValue('GE comparison unavailable: '+error.message);}
+  addResultChart(chart(rows));
+  var spec=geSourceSpec(key),fits=['EVI2_GE','NDVI_GE'].map(function(k){
+    var f=geLinearFit(rows,k),label=k.replace('_GE','');
+    return f?label+' at GE=0: '+f.intercept.toFixed(4)+'; R²='+(f.r2===null?'undefined':f.r2.toFixed(3))+'; n='+f.n+(f.extrapolated?' (extrapolated)':''):label+': insufficient GE variation for a fit';
+  });
+  var applied=rows.length&&carbonFinite(rows[0].ndvi_min_used)?'Applied NDVImin = '+rows[0].ndvi_min_used.toFixed(4)+' for this run.':'NDVImin fit unavailable.';
+  addChartNote(ui.Label({value:spec.label+'; matched pixels and dates at the selected timestep.\n'+fits.join('\n')+'\n'+applied+' EVI2min is unchanged.',style:{whiteSpace:'pre-wrap'}}));
+
 }
 
 function addWeatherCharts(output, rows, regionName) {

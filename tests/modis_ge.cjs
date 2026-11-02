@@ -15,6 +15,11 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  assert.equal(missing[1].GE,null);assert.equal(missing[1].EVI2_GE,null);assert.equal(missing[1].NDVI_GE,null);
  assert.equal(c.geLinearFit([{GE:1,NDVI_GE:.2},{GE:1,NDVI_GE:.3},{GE:1,NDVI_GE:.4}],'NDVI_GE'),null);
  const negative=rows.map(r=>({...r,GE:r.GE-1}));assert.equal(c.geLinearFit(negative,'NDVI_GE').extrapolated,true);
+ const fit=c.ndviMinGEFit(rows,{ndvi_max:.95});assert(Math.abs(fit.intercept-.4)<1e-10);
+ assert.throws(()=>c.ndviMinGEFit(rows.slice(0,2),{ndvi_max:.95}),/at least three/);
+ assert.throws(()=>c.ndviMinGEFit(rows,{ndvi_max:.3}),/not below NDVImax/);
+ assert.throws(()=>c.ndviMinGEFit(rows.map(r=>({...r,NDVI_GE:r.NDVI_GE-2})),{ndvi_max:.95}),/outside/);
+
 }
 console.log('PASS MODIS source mapping, common-support interpolation/aggregation, zero/negative GE, regression intercepts, missing data and degenerate fits');
 
