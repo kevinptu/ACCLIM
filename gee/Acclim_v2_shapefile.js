@@ -2851,6 +2851,118 @@ function annualClimateNote(rows, start, end, variable) {
   return (variable === 'Tdaily' ? 'Mean annual air temperature (24-hour): ' : 'Annual precipitation: ') + values.join('; ');
 }
 
+// Independent matched-pixel diagnostics; never substitute 500 m values into model forcing.
+function geSourceSpec(key) {
+  var s=SATELLITE_SOURCES[key];
+  if(key.indexOf('MODIS')===0){var daily=key==='MODIS1';return {modis:true,daily:daily,scale:500,gap:32,
+    ids:daily?['MODIS/061/MOD09GA','MODIS/061/MYD09GA']:['MODIS/061/MOD09A1','MODIS/061/MYD09A1'],
+    label:daily?'MOD09GA / MYD09GA (500 m, daily)':'MOD09A1 / MYD09A1 (500 m, 8-day; actual observation dates)'};}
+  return {modis:false,scale:s.scale,gap:s.gap,label:s.label};
+}
+function geDiagnosticBands(red,nir,green,blue,mask) {
+  [red,nir,green,blue].forEach(function(b){mask=mask.and(b.gte(0)).and(b.lte(1)).and(b.mask());});
+  mask=mask.and(red.add(nir).gt(0));
+  return green.multiply(2).subtract(red).subtract(blue).rename('GE')
+    .addBands(nir.subtract(red).multiply(2.5).divide(nir.add(red.multiply(2.4)).add(1)).rename('EVI2_GE'))
+    .addBands(nir.subtract(red).divide(nir.add(red)).rename('NDVI_GE')).updateMask(mask);
+}
+function sampleGEDiagnostics(geom,start,end,key) {
+  var spec=geSourceSpec(key),images;
+  if(spec.modis){
+    images=ee.ImageCollection([]);
+    spec.ids.forEach(function(id){images=images.merge(ee.ImageCollection(id).filterBounds(geom).filterDate(start,ee.Date(end).advance(1,'day')).map(function(img){
+      var d=ee.Date(img.get('system:time_start')),qa=img.select(spec.daily?'QC_500m':'QA'),state=img.select(spec.daily?'state_1km':'StateQA');
+      var mask=clearModisState(state).and(state.rightShift(3).bitwiseAnd(7).eq(1))
+        .and(state.rightShift(6).bitwiseAnd(3).lt(3)).and(qa.bitwiseAnd(3).eq(0)).and(qa.rightShift(2).bitwiseAnd(65535).eq(0));
+      var out=geDiagnosticBands(img.select('sur_refl_b01').multiply(0.0001),img.select('sur_refl_b02').multiply(0.0001),
+        img.select('sur_refl_b04').multiply(0.0001),img.select('sur_refl_b03').multiply(0.0001),mask);
+      var day=spec.daily?ee.Image.constant(d.millis().divide(86400000)):
+        img.select('DayOfYear').subtract(1).add(ee.Date.fromYMD(d.get('year'),1,1).millis().divide(86400000));
+      return out.addBands(day.rename('observation_day')).set({sample_millis:d.millis()});
+    }));});
+  } else {
+    images=satelliteImages(geom,ee.Date(start),ee.Date(end).advance(1,'day'),key).map(function(img){
+      var red=img.select('red'),nir=img.select('nir'),ge=img.select('GE');
+      return ge.addBands(nir.subtract(red).multiply(2.5).divide(nir.add(red.multiply(2.4)).add(1)).rename('EVI2_GE'))
+        .addBands(nir.subtract(red).divide(nir.add(red)).rename('NDVI_GE'))
+        .updateMask(ge.mask().and(red.mask()).and(nir.mask())).addBands(img.select('observation_day'))
+        .set({sample_millis:img.get('sample_millis')});
+    });
+  }
+  return ee.FeatureCollection(images.toList(images.size().max(1)).map(function(item){
+    var img=ee.Image(item),d=ee.Date(img.get('sample_millis'));
+    var count=spec.modis&&!spec.daily?ee.Date.fromYMD(d.get('year').add(1),1,1).difference(d,'day').min(8):ee.Number(1);
+    return ee.List.sequence(0,count.subtract(1)).map(function(i){
+      var t=d.advance(i,'day'),values=img.select(['GE','EVI2_GE','NDVI_GE']).updateMask(img.select('observation_day').eq(t.millis().divide(86400000)))
+        .reduceRegion({reducer:ee.Reducer.mean(),geometry:geom,scale:spec.scale,maxPixels:1e10,tileScale:4});
+      return ee.Feature(null,values).set({date:t.format('YYYY-MM-dd'),millis:t.millis()});
+    });
+  }).flatten()).filter(ee.Filter.notNull(['GE','EVI2_GE','NDVI_GE']));
+}
+// Same weights, dates and support for all three diagnostic quantities.
+function aggregateGEDiagnostics(observations,periods,gapDays) {
+  var fields=['GE','EVI2_GE','NDVI_GE'],groups={};
+  observations.forEach(function(r){if(!fields.every(function(k){return carbonFinite(r[k]);}))return;
+    var g=groups[r.millis]||(groups[r.millis]={millis:r.millis,n:0,GE:0,EVI2_GE:0,NDVI_GE:0});
+    g.n++;fields.forEach(function(k){g[k]+=r[k];});
+  });
+  var obs=Object.keys(groups).map(function(k){var g=groups[k];fields.forEach(function(f){g[f]/=g.n;});return g;}).sort(function(a,b){return a.millis-b.millis;}),j=0;
+  return periods.map(function(p){var out={date:p.date,GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0,GE_observed_pct:0},n=0,direct=0,sums={GE:0,EVI2_GE:0,NDVI_GE:0};
+    var a=carbonDateMillis(p.date),b=a+nativePeriodSeconds(p)*1000;
+    for(var t=a;t<b;t+=86400000){
+      while(j<obs.length&&obs[j].millis<t)j++;
+      var r=obs[j],l=r&&r.millis===t?r:obs[j-1];
+      if(!l||!r||(r.millis-l.millis)>gapDays*86400000)continue;
+      var w=r.millis===l.millis?0:(t-l.millis)/(r.millis-l.millis);n++;if(l.millis===r.millis)direct++;
+      fields.forEach(function(k){sums[k]+=l[k]+(r[k]-l[k])*w;});
+    }
+    if(n)fields.forEach(function(k){out[k]=sums[k]/n;});
+    out.GE_available_pct=100*n/((b-a)/86400000);out.GE_observed_pct=100*direct/((b-a)/86400000);return out;
+  });
+}
+function geLinearFit(rows,field) {
+  var pairs=rows.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r[field]);}),n=pairs.length;
+  if(n<3)return null;
+  var x=pairs.reduce(function(a,r){return a+r.GE;},0)/n,y=pairs.reduce(function(a,r){return a+r[field];},0)/n,xx=0,xy=0,yy=0;
+  pairs.forEach(function(r){xx+=Math.pow(r.GE-x,2);xy+=(r.GE-x)*(r[field]-y);yy+=Math.pow(r[field]-y,2);});
+  if(xx<1e-14)return null;
+  return {n:n,slope:xy/xx,intercept:y-xy/xx*x,r2:yy>0?xy*xy/(xx*yy):null,
+    extrapolated:pairs.every(function(r){return r.GE>0;})||pairs.every(function(r){return r.GE<0;})};
+}
+function addGEComparison(rows,geom,start,end,requestId,regionName,key) {
+  function chart(data){return ui.Chart({cols:[{label:'GE',type:'number'},{label:'EVI2',type:'number'},{label:'NDVI',type:'number'}],
+    rows:data.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r.EVI2_GE)&&carbonFinite(r.NDVI_GE);}).map(function(r){return {c:[{v:r.GE},{v:r.EVI2_GE},{v:r.NDVI_GE}]};})})
+    .setChartType('ScatterChart').setOptions({title:regionChartTitle('EVI2 and NDVI vs GE',regionName),chartArea:{top:80},
+      hAxis:{title:'Green excess: 2 × G − R − B'},vAxis:{title:'Vegetation index'},legend:{position:'top'},
+      colors:['#8E24AA','#2E7D32'],pointSize:3,lineWidth:0,
+      trendlines:{0:{type:'linear',color:'#8E24AA',lineWidth:1,visibleInLegend:false},1:{type:'linear',color:'#2E7D32',lineWidth:1,visibleInLegend:false}}});}
+  rows.forEach(function(r){r.GE=null;r.EVI2_GE=null;r.NDVI_GE=null;r.GE_available_pct=0;r.GE_status='loading';});
+  UI._lastNative=carbonRowsToFC(rows);UI._lastOutput=carbonRowsToFC(rows);
+  addResultChart(chart([]));var replace=chartReplacer(),spec=geSourceSpec(key);
+  var note=ui.Label({value:'Loading matched reflectance: '+spec.label,style:{whiteSpace:'pre-wrap'}});addChartNote(note);
+  var cursor=carbonDateMillis(start)-(spec.gap+32)*86400000,stop=carbonDateMillis(end)+(spec.gap+32)*86400000,all=[];
+  function batch(){
+    if(requestId!==UI._requestId)return;
+    if(cursor>stop){
+      var diagnostic=aggregateGEDiagnostics(all,rows,spec.gap);
+      diagnostic.forEach(function(d,i){Object.keys(d).forEach(function(k){if(k!=='date')rows[i][k]=d[k];});rows[i].GE_source=spec.label;rows[i].GE_scale_m=spec.scale;rows[i].GE_status=carbonFinite(d.GE)?'available':'unavailable';});
+      replace(chart(diagnostic));
+      var fits=['EVI2_GE','NDVI_GE'].map(function(k){var f=geLinearFit(diagnostic,k),label=k.replace('_GE','');
+        return f?label+' at GE=0: '+f.intercept.toFixed(4)+'; R²='+(f.r2===null?'undefined':f.r2.toFixed(3))+'; n='+f.n+(f.extrapolated?' (extrapolated)':''):label+': insufficient GE variation for a fit';});
+      note.setValue(spec.label+'; '+diagnostic.filter(function(r){return carbonFinite(r.GE);}).length+'/'+rows.length+' periods with matched pixels and dates, aggregated to the selected timestep.\n'+fits.join('\n')+'\nIntercepts are exploratory baseline diagnostics; GE=0 does not by itself establish bare soil. No model parameter is changed.');
+      UI._lastNative=carbonRowsToFC(rows);UI._lastOutput=carbonRowsToFC(rows);return;
+    }
+    var next=Math.min(cursor+32*86400000,stop+86400000);
+    var sample=sampleGEDiagnostics(geom,carbonDateString(cursor),carbonDateString(next-86400000),key);
+    sample.toList(sample.size().max(1)).map(function(f){return ee.Feature(f).toDictionary();}).evaluate(function(result,error){
+      if(requestId!==UI._requestId)return;
+      if(error){rows.forEach(function(r){r.GE_status='unavailable';});UI._lastNative=carbonRowsToFC(rows);UI._lastOutput=carbonRowsToFC(rows);note.setValue('GE comparison unavailable: '+error);return;}
+      all=all.concat(result||[]);cursor=next;batch();
+    });
+  }
+  try{batch();}catch(error){note.setValue('GE comparison unavailable: '+error.message);}
+}
+
 function addWeatherCharts(output, rows, regionName) {
   addResultChart(ui.Chart.feature.byFeature(output, 'date', ['VPD_kPa', 'WUE'])
     .setSeriesNames(['VPD', 'WUE'])
@@ -2878,21 +2990,7 @@ function addWeatherCharts(output, rows, regionName) {
   var replaceScatter = chartReplacer();
   UI._chartCard.add(ui.Select({items: ['WUE', 'gs'], value: 'WUE',
     onChange: function(metric) { replaceScatter(scatter(metric)); }, style: {margin: '4px 8px'}}));
-  // EVI2 paired with green excess at the selected timestep (reflectance units).
-  var eviGEPairs = rows.filter(function(r) {
-    return carbonFinite(r.GE) && carbonFinite(r.EVI2);
-  });
-  var eviGETable = {cols: [
-    {id: 'GE', label: 'Green excess (GE)', type: 'number'},
-    {id: 'EVI2', label: 'EVI2', type: 'number'}],
-    rows: eviGEPairs.map(function(r) { return {c: [{v: r.GE}, {v: r.EVI2}]}; })};
-  addResultChart(ui.Chart(eviGETable).setChartType('ScatterChart').setOptions({
-    title: regionChartTitle('EVI2 vs GE', regionName), chartArea: {top: 80},
-    hAxis: {title: 'Green excess: 2 × G − R − B'}, vAxis: {title: 'EVI2'},
-    legend: {position: 'none'}, colors: ['#8E24AA'],
-    pointSize: 4, pointShape: 'circle', lineWidth: 0
-  }));
-  if(!eviGEPairs.length)addChartNote(ui.Label('GE unavailable: use HLS or Landsat reflectance with valid red, green and blue bands. Current MODIS selections do not include green reflectance.'));
+
 }
 
 // BEGIN CARBON ASYNC UI
@@ -2997,6 +3095,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
           : 'FAPAR: NDVI² fallback. Fit needs at least 3 paired months, a positive slope, and minimum below maximum.'));
       }
       addWeatherCharts(output, result.monthly, regionName);
+      addGEComparison(result.monthly,geom,start,end,requestId,regionName,UI._lastRun.satelliteSource);
       var valid = products.daily.filter(function(r) { return carbonFinite(r.NPPdaily); }).length;
       var biomassDays = products.daily.filter(function(r) { return carbonFinite(r.HerbaceousAGBdaily); }).length;
       setStatus('Ready: ' + valid + '/' + products.daily.length + ' days have GPP/NPP; ' +
