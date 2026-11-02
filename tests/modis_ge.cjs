@@ -11,8 +11,13 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  const f=c.geLinearFit(rows,'NDVI_GE');assert(Math.abs(f.intercept-.2)<1e-10);assert(Math.abs(f.slope-.4)<1e-10);assert(Math.abs(f.r2-1)<1e-10);assert.equal(f.extrapolated,false);
  const norm=c.normalizeGE(rows);assert.equal(norm[0].GE_normalized,0);assert.equal(norm[2].GE_normalized,1);assert.equal(norm[1].GE_normalized,.5);
  assert(Math.abs(c.geLinearFit(rows,'EVI2_GE').intercept-.1)<1e-10);
- const shifted=rows.map(r=>({...r,GE:10+3*r.GE}));assert(Math.abs(c.geLinearFit(shifted,'NDVI_GE').intercept-f.intercept)<1e-10);
- assert.equal(c.normalizeGE([{GE:0,EVI2_GE:.1,NDVI_GE:.2}])[0].GE_normalized,null);
+ const positive=rows.map(r=>({...r,GE:r.GE+.2}));
+ assert.equal(c.normalizeGE(positive)[0].GE_normalized,positive[0].GE);
+ const pf=c.geLinearFit(positive,'NDVI_GE');assert(Math.abs(pf.intercept)<1e-10);assert(Math.abs(pf.slope-2)<1e-10);assert.equal(pf.extrapolated,true);
+ const zero=rows.map(r=>({...r,GE:r.GE+.1}));assert.equal(c.normalizeGE(zero)[2].GE_normalized,.2);assert.equal(c.geLinearFit(zero,'NDVI_GE').extrapolated,false);
+ assert.equal(c.normalizeGE(rows)[0].GE_normalization_applied,true);assert.equal(c.normalizeGE(positive)[0].GE_normalization_applied,false);
+ assert.equal(c.normalizeGE([{GE:-.1,EVI2_GE:.1,NDVI_GE:.2}])[0].GE_normalized,null);
+ assert.equal(c.normalizeGE([{GE:0,EVI2_GE:.1,NDVI_GE:.2}])[0].GE_normalized,0);
  const week=c.aggregateGEDiagnostics(obs,c.selectedTimestepPeriods('2024-01-01','2024-01-03','weekly'),32)[0];assert.equal(week.GE,0);assert(Math.abs(week.NDVI_GE-.4)<1e-10);
  // A missing index rejects the entire triplet; no independent support or fabricated zeros.
  const missing=c.aggregateGEDiagnostics([obs[0],{...obs[1],NDVI_GE:null}],c.selectedTimestepPeriods('2024-01-01','2024-01-03','daily'),32);
