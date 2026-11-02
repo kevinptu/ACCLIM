@@ -132,6 +132,14 @@ Each candidate is evaluated against the whole pooled cloud, not only its origina
 
 Candidate geometric score is `3 × below_fraction + max(0, 1 − supported_span) + (1 − enclosure) + max(0, 4 − supported_bins)`. Only candidates passing the above support checks enter the plausible-geometry comparison. If none passes, the best geometric exploratory fit is displayed rather than reporting that soil does not exist. Numerical/insufficient-data cases still return no fit.
 
+### Ten-year fifth-percentile FAPAR option
+
+The optional **FAPAR = FIPAR; VI minima = 10-year fifth percentiles** choice uses the selected location and satellite source for the ten calendar years preceding the run start date, excluding the start date itself. A February 29 lookback starts February 28 if the earlier year is not a leap year. The default remains ordinary FAPAR = FIPAR.
+
+Historical reflectance uses the existing satellite quality masks, actual observation dates where available, and composite midpoints otherwise. Requests are batched in 90-day segments. On each valid observation date, location-mean red/NIR determine NDVI and EVI2; each date contributes once. The two fifth percentiles are calculated independently by linear interpolation between sorted values at rank `0.05 * (n - 1)`. Missing dates are not interpolated, and the model timestep does not reweight the baseline.
+
+The estimated NDVImin and EVI2min are assigned to run-specific parameters before forcing assembly. FAPAR remains equal to NDVI-derived FIPAR, so EVI2min does not affect photosynthesis in this mode. Available history is used even when the product does not cover all ten years; the chart note and CSV report the requested window, first and last observed dates, sample count, and both minima. Fewer than three valid dates or NDVImin at/above NDVImax stops the run with an explicit message. No alternative satellite source or configured minimum is silently substituted. CSV fields are `ndvi_min_p05`, `evi2_min_p05`, `vi_baseline_n`, `vi_baseline_start`, `vi_baseline_end`, `vi_baseline_first_observation`, and `vi_baseline_last_observation`.
+
 ### Regression-based EVI2min and NDVImin
 
 For each plausible edge, draw **8,192 independent uniform red/NIR pairs**, using the same fixed seed (173) and initial draws for every geometry. Four visible controls set red and NIR minima/maxima (default 0–1 for each). Retain nonnegative PVI and positive red + NIR. At least 100 retained points and nonzero PVI variance are required. These are **simulated reflectances**, not observed satellite points or a claim that all combinations occur in nature.
