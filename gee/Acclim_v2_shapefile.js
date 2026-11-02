@@ -664,13 +664,13 @@ function satelliteImages(geom,start,end,key) {
       var d=ee.Date(ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'));
       var dateDay=ee.Image.constant(d.millis().divide(86400000));
       var sampleDay=d;
-      var red,nir,mask=ee.Image.constant(1);
+      var red,nir,green,blue,mask=ee.Image.constant(1);
       if(spec.kind==='landsat') {
-        red=img.select('red');nir=img.select('nir');
+        red=img.select('red');nir=img.select('nir');green=img.select('green');blue=img.select('blue');
         dateDay=dateDay.add(spec.days/2); // Catalog composites have no selected-pixel date band.
         sampleDay=d.advance(spec.days/2,'day');
       } else if(spec.kind==='hls') {
-        red=img.select('B4');nir=img.select(id.indexOf('HLSS30')>=0?'B8A':'B5');
+        red=img.select('B4');nir=img.select(id.indexOf('HLSS30')>=0?'B8A':'B5');green=img.select('B3');blue=img.select('B2');
         var fm=img.select('Fmask');mask=fm.bitwiseAnd(30).eq(0).and(fm.rightShift(6).bitwiseAnd(3).lt(3));
       } else {
         red=img.select('sur_refl_b01').multiply(0.0001);nir=img.select('sur_refl_b02').multiply(0.0001);
@@ -693,7 +693,11 @@ function satelliteImages(geom,start,end,key) {
         }
       }
       mask=mask.and(red.gte(0)).and(nir.gte(0)).and(red.lte(1)).and(nir.lte(1)).and(red.add(nir).gt(0));
-      return red.rename('red').addBands(nir.rename('nir')).addBands(dateDay.rename('observation_day'))
+      // GE is a diagnostic only: missing RGB must not mask the model's red/NIR.
+      var ge=ee.Image.constant(0).rename('GE').updateMask(ee.Image.constant(0));
+      if(green&&blue)ge=green.multiply(2).subtract(red).subtract(blue).rename('GE')
+        .updateMask(green.gte(0).and(green.lte(1)).and(blue.gte(0)).and(blue.lte(1)));
+      return red.rename('red').addBands(nir.rename('nir')).addBands(ge).addBands(dateDay.rename('observation_day'))
         .updateMask(mask).set({'system:time_start':img.get('system:time_start'),sample_millis:sampleDay.millis()});
     });
     merged=merged.merge(images);
@@ -712,14 +716,14 @@ function sampleSatellite(geom,start,end,key,unpadded) {
     var count=spec.kind==='vi'?ee.Date.fromYMD(startDay.get('year').add(1),1,1).difference(startDay,'day').min(16):ee.Number(1);
     return ee.List.sequence(0,count.subtract(1)).map(function(i) {
       var d=startDay.advance(i,'day');
-      var pair=img.select(['red','nir']).updateMask(img.select('observation_day').eq(d.millis().divide(86400000)));
+      var pair=img.select(['red','nir','GE']).updateMask(img.select('observation_day').eq(d.millis().divide(86400000)));
       var values=pair.reduceRegion({reducer:ee.Reducer.mean(),geometry:geom,scale:spec.scale,maxPixels:1e10,tileScale:4});
       return ee.Feature(null,values).set({date:d.format('YYYY-MM-dd'),millis:d.millis()});
     });
   }).flatten()).filter(ee.Filter.notNull(['red','nir']));
   var observed=sampled.distinct(['millis']).map(function(f) {
     var same=sampled.filter(ee.Filter.eq('millis',f.get('millis')));
-    return f.set({red:same.aggregate_mean('red'),nir:same.aggregate_mean('nir'),satellite_observation_count:same.size()});
+    return f.set({red:same.aggregate_mean('red'),nir:same.aggregate_mean('nir'),GE:same.aggregate_mean('GE'),GE_observation_count:same.filter(ee.Filter.notNull(['GE'])).size(),satellite_observation_count:same.size()});
   });
   return observed;
 }
@@ -738,7 +742,9 @@ function alignedSatellite(geom,start,end,key,observations) {
     var red=l.getNumber('red').add(r.getNumber('red').subtract(l.getNumber('red')).multiply(w));
     var nir=l.getNumber('nir').add(r.getNumber('nir').subtract(l.getNumber('nir')).multiply(w));
     var same=l.getNumber('millis').eq(t).and(valid);
-    return f.set({red:ee.Algorithms.If(valid,red,null),nir:ee.Algorithms.If(valid,nir,null),
+    var geValid=valid.and(l.toDictionary(['GE']).size().eq(1)).and(r.toDictionary(['GE']).size().eq(1));
+    var geLeft=ee.Number(ee.Algorithms.If(geValid,l.get('GE'),0)),geRight=ee.Number(ee.Algorithms.If(geValid,r.get('GE'),0));
+    return f.set({GE:ee.Algorithms.If(geValid,geLeft.add(geRight.subtract(geLeft).multiply(w)),null),GE_available_pct:ee.Algorithms.If(geValid,100,0),red:ee.Algorithms.If(valid,red,null),nir:ee.Algorithms.If(valid,nir,null),
       NDVI:ee.Algorithms.If(valid,nir.subtract(red).divide(nir.add(red).max(1e-12)),null),
       EVI2:ee.Algorithms.If(valid,nir.subtract(red).multiply(2.5).divide(nir.add(red.multiply(2.4)).add(1)).max(0).min(1),null),
       satellite_status:ee.Algorithms.If(valid,ee.Algorithms.If(same,'observed','interpolated'),'unavailable'),
@@ -781,7 +787,7 @@ function assembleSelectedForcing(geom,start,end,config) {
     var props=ee.Dictionary({});
     // Unavailable satellite periods have null means; Dictionary.set rejects null.
     // Omit those properties so the existing completeness check flags the period.
-    ['red','nir','NDVI','EVI2','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){
+    ['red','nir','NDVI','EVI2','GE','GE_available_pct','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){
       var mean=vi.aggregate_mean(k);
       props=ee.Dictionary(ee.Algorithms.If(ee.Algorithms.IsEqual(mean,null),props,props.set(k,mean)));
     });
@@ -1931,7 +1937,7 @@ function finishACCLIM(baseline, params) {
         'weather_source_cadence','weather_temporally_allocated_pct','weather_temporal_method','weather_missing_day_pct',
         'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_status',
         'satellite_date_basis','satellite_gap_days','satellite_left_date','satellite_right_date','satellite_max_gap_days',
-        'Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','NDVI','EVI2','red','nir',
+        'Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','NDVI','EVI2','red','nir','GE','GE_available_pct',
         'precip','precip_units','fSM_mean','fSM_et_mean']);
     return ee.Feature(f.geometry(),f.toDictionary(keep));
   });
@@ -2318,16 +2324,17 @@ function carbonAllocation(context, p) {
 function alignSatelliteRows(observations,start,end,key) {
   var spec=SATELLITE_SOURCES[key],groups={};
   observations.forEach(function(r){var k=String(r.millis),n=r.satellite_observation_count||1;
-    if(!groups[k])groups[k]={millis:r.millis,red:0,nir:0,n:0};
+    if(!groups[k])groups[k]={millis:r.millis,red:0,nir:0,n:0,ge:0,geN:0};
     groups[k].red+=r.red*n;groups[k].nir+=r.nir*n;groups[k].n+=n;
+    if(carbonFinite(r.GE)){var gn=r.GE_observation_count||n;groups[k].ge+=r.GE*gn;groups[k].geN+=gn;}
   });
-  var obs=Object.keys(groups).map(function(k){var g=groups[k];return {millis:g.millis,red:g.red/g.n,nir:g.nir/g.n};})
+  var obs=Object.keys(groups).map(function(k){var g=groups[k];return {millis:g.millis,red:g.red/g.n,nir:g.nir/g.n,GE:g.geN?g.ge/g.geN:null};})
     .sort(function(a,b){return a.millis-b.millis;}),rows=[],j=0;
   for(var t=carbonDateMillis(start);t<=carbonDateMillis(end);t+=86400000) {
     while(j<obs.length && obs[j].millis<t)j++;
     var r=obs[j],l=r&&r.millis===t?r:obs[j-1];
     var gap=l&&r?(r.millis-l.millis)/86400000:null,valid=l&&r&&gap<=spec.gap,same=valid&&gap===0;
-    var row={date:carbonDateString(t),millis:t,satellite_source:key,satellite_scale_m:spec.scale,
+    var row={date:carbonDateString(t),millis:t,GE_available_pct:0,satellite_source:key,satellite_scale_m:spec.scale,
       satellite_date_basis:spec.kind==='vi'?'pixel observation date':spec.days===1?'observation date':'composite midpoint',
       satellite_status:valid?(same?'observed':'interpolated'):'unavailable',satellite_missing_pct:same?0:100,
       satellite_unavailable_pct:valid?0:100,satellite_gap_days:valid?gap:null,satellite_max_gap_days:spec.gap,
@@ -2335,6 +2342,7 @@ function alignSatelliteRows(observations,start,end,key) {
     if(valid) {
       var w=gap?(t-l.millis)/(r.millis-l.millis):0;
       row.red=l.red+(r.red-l.red)*w;row.nir=l.nir+(r.nir-l.nir)*w;
+      if(carbonFinite(l.GE)&&carbonFinite(r.GE)){row.GE=l.GE+(r.GE-l.GE)*w;row.GE_available_pct=100;}
       row.NDVI=(row.nir-row.red)/(row.nir+row.red);
       row.EVI2=Math.max(0,Math.min(1,2.5*(row.nir-row.red)/(row.nir+2.4*row.red+1)));
     }
@@ -2870,20 +2878,21 @@ function addWeatherCharts(output, rows, regionName) {
   var replaceScatter = chartReplacer();
   UI._chartCard.add(ui.Select({items: ['WUE', 'gs'], value: 'WUE',
     onChange: function(metric) { replaceScatter(scatter(metric)); }, style: {margin: '4px 8px'}}));
-  // EVI2 paired with native-timestep Priestley-Taylor daytime energy flux.
-  var eviPTPairs = rows.filter(function(r) {
-    return carbonFinite(r.PT_mean) && carbonFinite(r.EVI2);
+  // EVI2 paired with green excess at the selected timestep (reflectance units).
+  var eviGEPairs = rows.filter(function(r) {
+    return carbonFinite(r.GE) && carbonFinite(r.EVI2);
   });
-  var eviPTTable = {cols: [
-    {id: 'PT_mean', label: 'PT_mean (W/m²)', type: 'number'},
+  var eviGETable = {cols: [
+    {id: 'GE', label: 'Green excess (GE)', type: 'number'},
     {id: 'EVI2', label: 'EVI2', type: 'number'}],
-    rows: eviPTPairs.map(function(r) { return {c: [{v: r.PT_mean}, {v: r.EVI2}]}; })};
-  addResultChart(ui.Chart(eviPTTable).setChartType('ScatterChart').setOptions({
-    title: regionChartTitle('EVI2 vs PT_mean', regionName), chartArea: {top: 80},
-    hAxis: {title: 'PT_mean (W/m²; daytime)'}, vAxis: {title: 'EVI2'},
+    rows: eviGEPairs.map(function(r) { return {c: [{v: r.GE}, {v: r.EVI2}]}; })};
+  addResultChart(ui.Chart(eviGETable).setChartType('ScatterChart').setOptions({
+    title: regionChartTitle('EVI2 vs GE', regionName), chartArea: {top: 80},
+    hAxis: {title: 'Green excess: 2 × G − R − B'}, vAxis: {title: 'EVI2'},
     legend: {position: 'none'}, colors: ['#8E24AA'],
     pointSize: 4, pointShape: 'circle', lineWidth: 0
   }));
+  if(!eviGEPairs.length)addChartNote(ui.Label('GE unavailable: use HLS or Landsat reflectance with valid red, green and blue bands. Current MODIS selections do not include green reflectance.'));
 }
 
 // BEGIN CARBON ASYNC UI
