@@ -8,16 +8,20 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  const rows=c.aggregateGEDiagnostics(obs,c.selectedTimestepPeriods('2024-01-01','2024-01-03','daily'),32);
  assert.equal(rows[1].GE,0);assert(Math.abs(rows[1].EVI2_GE-.2)<1e-10);assert(Math.abs(rows[1].NDVI_GE-.4)<1e-10);
  assert.equal(rows[1].GE_observed_pct,0);assert.equal(rows[1].GE_available_pct,100);
- const f=c.geLinearFit(rows,'NDVI_GE');assert(Math.abs(f.intercept-.4)<1e-10);assert(Math.abs(f.slope-2)<1e-10);assert(Math.abs(f.r2-1)<1e-10);assert.equal(f.extrapolated,false);
+ const f=c.geLinearFit(rows,'NDVI_GE');assert(Math.abs(f.intercept-.2)<1e-10);assert(Math.abs(f.slope-.4)<1e-10);assert(Math.abs(f.r2-1)<1e-10);assert.equal(f.extrapolated,false);
+ const norm=c.normalizeGE(rows);assert.equal(norm[0].GE_normalized,0);assert.equal(norm[2].GE_normalized,1);assert.equal(norm[1].GE_normalized,.5);
+ assert(Math.abs(c.geLinearFit(rows,'EVI2_GE').intercept-.1)<1e-10);
+ const shifted=rows.map(r=>({...r,GE:10+3*r.GE}));assert(Math.abs(c.geLinearFit(shifted,'NDVI_GE').intercept-f.intercept)<1e-10);
+ assert.equal(c.normalizeGE([{GE:0,EVI2_GE:.1,NDVI_GE:.2}])[0].GE_normalized,null);
  const week=c.aggregateGEDiagnostics(obs,c.selectedTimestepPeriods('2024-01-01','2024-01-03','weekly'),32)[0];assert.equal(week.GE,0);assert(Math.abs(week.NDVI_GE-.4)<1e-10);
  // A missing index rejects the entire triplet; no independent support or fabricated zeros.
  const missing=c.aggregateGEDiagnostics([obs[0],{...obs[1],NDVI_GE:null}],c.selectedTimestepPeriods('2024-01-01','2024-01-03','daily'),32);
  assert.equal(missing[1].GE,null);assert.equal(missing[1].EVI2_GE,null);assert.equal(missing[1].NDVI_GE,null);
  assert.equal(c.geLinearFit([{GE:1,NDVI_GE:.2},{GE:1,NDVI_GE:.3},{GE:1,NDVI_GE:.4}],'NDVI_GE'),null);
- const negative=rows.map(r=>({...r,GE:r.GE-1}));assert.equal(c.geLinearFit(negative,'NDVI_GE').extrapolated,true);
- const fit=c.ndviMinGEFit(rows,{ndvi_max:.95});assert(Math.abs(fit.intercept-.4)<1e-10);
+ const negative=rows.map(r=>({...r,GE:r.GE-1}));assert.equal(c.geLinearFit(negative,'NDVI_GE').extrapolated,false);
+ const fit=c.ndviMinGEFit(rows,{ndvi_max:.95});assert(Math.abs(fit.intercept-.2)<1e-10);
  assert.throws(()=>c.ndviMinGEFit(rows.slice(0,2),{ndvi_max:.95}),/at least three/);
- assert.throws(()=>c.ndviMinGEFit(rows,{ndvi_max:.3}),/not below NDVImax/);
+ assert.throws(()=>c.ndviMinGEFit(rows,{ndvi_max:.1}),/not below NDVImax/);
  assert.throws(()=>c.ndviMinGEFit(rows.map(r=>({...r,NDVI_GE:r.NDVI_GE-2})),{ndvi_max:.95}),/outside/);
 
 }

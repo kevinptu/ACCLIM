@@ -32,7 +32,7 @@ var ACCLIM_PARAMS = {
   fANPP_slope:    0.0129,
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
-  fDexp:          0.5,      // VPD attenuation exponent (VPDday_mean in kPa)
+  fDexp:          0,      // VPD attenuation exponent (VPDday_mean in kPa)
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
@@ -63,9 +63,9 @@ var ACCLIM_PARAMS = {
   em_v:           0.97,     // emissivity of green vegetation
   em_nv:          0.92,     // emissivity of non-vegetation
   // Intercepted PAR fraction used for water and energy partitioning.
-  ndvi_min: 0, // Used unless the GE=0 NDVImin option is selected.
-  ndvi_max: 0.95,
-  ndvi_exp: 1
+  ndvi_min: 0, // Used unless the normalized GE=0 NDVImin option is selected.
+  ndvi_max: 1,
+  ndvi_exp: 1.6
 };
 
 var DATASETS = {
@@ -2133,10 +2133,13 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   params=mergeParams(ACCLIM_PARAMS,params||{});
   var gePeriods=[],ndviFit;
   function complete(rows){
+    gePeriods=normalizeGE(gePeriods);
+    var eviFit=geLinearFit(gePeriods,'EVI2_GE'),ndviDiagnosticFit=geLinearFit(gePeriods,'NDVI_GE');
     var byDate={};gePeriods.forEach(function(r){byDate[r.date]=r;});
     var spec=geSourceSpec(cfg.satelliteSource||'MODIS16');
     var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0});
-      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitNDVIminGE?'NDVI at GE=0':'configured';
+      d.evi2_min_ge=eviFit?eviFit.intercept:null;d.ndvi_min_ge=ndviDiagnosticFit?ndviDiagnosticFit.intercept:null;
+      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitNDVIminGE?'NDVI at normalized GE=0':'configured';
       if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
         d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;}
       d.GE_source=spec.label;d.GE_scale_m=spec.scale;d.GE_status=carbonFinite(d.GE)?'available':'unavailable';return d;
@@ -2216,7 +2219,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       gePeriods=diagnostic||[];
       if(params.fitNDVIminGE){ndviFit=ndviMinGEFit(gePeriods,params);params.ndvi_min=ndviFit.intercept;}
       cfg.modelParams=params;
-      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+(params.fitNDVIminGE?' from GE=0':' (configured)')+'; preparing model inputs...');
+      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+(params.fitNDVIminGE?' from normalized GE=0':' (configured)')+'; preparing model inputs...');
       startInputs();
     }catch(error){done(null,error.message);}
   });
@@ -2970,20 +2973,31 @@ function aggregateGEDiagnostics(observations,periods,gapDays) {
     out.GE_available_pct=100*n/((b-a)/86400000);out.GE_observed_pct=100*direct/((b-a)/86400000);return out;
   });
 }
+// Normalize the paired selected-timestep observations over this run only.
+function normalizeGE(rows) {
+  var pairs=rows.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r.EVI2_GE)&&carbonFinite(r.NDVI_GE);});
+  var lo=null,hi=null;
+  pairs.forEach(function(r){lo=lo===null?r.GE:Math.min(lo,r.GE);hi=hi===null?r.GE:Math.max(hi,r.GE);});
+  return rows.map(function(r){var d={};Object.keys(r).forEach(function(k){d[k]=r[k];});
+    d.GE_min=lo;d.GE_max=hi;
+    d.GE_normalized=lo!==null&&hi-lo>1e-12&&carbonFinite(r.GE)&&carbonFinite(r.EVI2_GE)&&carbonFinite(r.NDVI_GE)?(r.GE-lo)/(hi-lo):null;
+    return d;
+  });
+}
 function geLinearFit(rows,field) {
-  var pairs=rows.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r[field]);}),n=pairs.length;
+  var pairs=normalizeGE(rows).filter(function(r){return carbonFinite(r.GE_normalized)&&carbonFinite(r[field]);}),n=pairs.length;
   if(n<3)return null;
-  var x=pairs.reduce(function(a,r){return a+r.GE;},0)/n,y=pairs.reduce(function(a,r){return a+r[field];},0)/n,xx=0,xy=0,yy=0;
-  pairs.forEach(function(r){xx+=Math.pow(r.GE-x,2);xy+=(r.GE-x)*(r[field]-y);yy+=Math.pow(r[field]-y,2);});
+  var x=pairs.reduce(function(a,r){return a+r.GE_normalized;},0)/n,y=pairs.reduce(function(a,r){return a+r[field];},0)/n,xx=0,xy=0,yy=0;
+  pairs.forEach(function(r){xx+=Math.pow(r.GE_normalized-x,2);xy+=(r.GE_normalized-x)*(r[field]-y);yy+=Math.pow(r[field]-y,2);});
   if(xx<1e-14)return null;
   return {n:n,slope:xy/xx,intercept:y-xy/xx*x,r2:yy>0?xy*xy/(xx*yy):null,
-    extrapolated:pairs.every(function(r){return r.GE>0;})||pairs.every(function(r){return r.GE<0;})};
+    geMin:pairs[0].GE_min,geMax:pairs[0].GE_max,extrapolated:false};
 }
 function ndviMinGEFit(diagnostic,params) {
   var fit=geLinearFit(diagnostic,'NDVI_GE');
-  if(!fit)throw new Error('Cannot estimate NDVImin at GE=0: at least three valid timestep pairs with varying GE are required. Choose a longer date range or a different timestep/source.');
+  if(!fit)throw new Error('Cannot estimate NDVImin at normalized GE=0: at least three valid timestep pairs with varying GE are required. Choose a longer date range or a different timestep/source.');
   if(!carbonFinite(fit.intercept)||fit.intercept < -1||fit.intercept > 1||fit.intercept>=params.ndvi_max)
-    throw new Error('NDVI at GE=0 ('+fit.intercept+') is outside [-1,1] or is not below NDVImax ('+params.ndvi_max+'). NDVImin was not applied.');
+    throw new Error('NDVI at normalized GE=0 ('+fit.intercept+') is outside [-1,1] or is not below NDVImax ('+params.ndvi_max+'). NDVImin was not applied.');
   return fit;
 }
 function fetchGEPeriods(geom,start,end,key,periods,requestId,done) {
@@ -3007,19 +3021,20 @@ function fetchGEPeriods(geom,start,end,key,periods,requestId,done) {
 }
 
 function addGEComparison(rows,geom,start,end,requestId,regionName,key) {
-  function chart(data){return ui.Chart({cols:[{label:'GE',type:'number'},{label:'EVI2',type:'number'},{label:'NDVI',type:'number'}],
-    rows:data.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r.EVI2_GE)&&carbonFinite(r.NDVI_GE);}).map(function(r){return {c:[{v:r.GE},{v:r.EVI2_GE},{v:r.NDVI_GE}]};})})
-    .setChartType('ScatterChart').setOptions({title:regionChartTitle('EVI2 and NDVI vs GE',regionName),chartArea:{top:80},
-      hAxis:{title:'Green excess: 2 × G − R − B'},vAxis:{title:'Vegetation index'},legend:{position:'top'},
+  rows=normalizeGE(rows);
+  function chart(data){return ui.Chart({cols:[{label:'Normalized GE',type:'number'},{label:'EVI2',type:'number'},{label:'NDVI',type:'number'}],
+    rows:data.filter(function(r){return carbonFinite(r.GE)&&carbonFinite(r.EVI2_GE)&&carbonFinite(r.NDVI_GE);}).map(function(r){return {c:[{v:r.GE_normalized},{v:r.EVI2_GE},{v:r.NDVI_GE}]};})})
+    .setChartType('ScatterChart').setOptions({title:regionChartTitle('EVI2 and NDVI vs normalized GE',regionName),chartArea:{top:80},
+      hAxis:{title:'Normalized GE: (GE − GEmin) / (GEmax − GEmin)'},vAxis:{title:'Vegetation index'},legend:{position:'top'},
       colors:['#8E24AA','#2E7D32'],pointSize:3,lineWidth:0,
       trendlines:{0:{type:'linear',color:'#8E24AA',lineWidth:1,visibleInLegend:false},1:{type:'linear',color:'#2E7D32',lineWidth:1,visibleInLegend:false}}});}
   addResultChart(chart(rows));
   var spec=geSourceSpec(key),fits=['EVI2_GE','NDVI_GE'].map(function(k){
     var f=geLinearFit(rows,k),label=k.replace('_GE','');
-    return f?label+' at GE=0: '+f.intercept.toFixed(4)+'; R²='+(f.r2===null?'undefined':f.r2.toFixed(3))+'; n='+f.n+(f.extrapolated?' (extrapolated)':''):label+': insufficient GE variation for a fit';
+    return f?label+' at normalized GE=0: '+f.intercept.toFixed(4)+'; R²='+(f.r2===null?'undefined':f.r2.toFixed(3))+'; n='+f.n+(f.extrapolated?' (extrapolated)':''):label+': insufficient GE variation for a fit';
   });
   var applied=rows.length&&carbonFinite(rows[0].ndvi_min_used)?'Applied NDVImin = '+rows[0].ndvi_min_used.toFixed(4)+' ('+rows[0].ndvi_min_source+') for this run.':'NDVImin unavailable.';
-  addChartNote(ui.Label({value:spec.label+'; matched pixels and dates at the selected timestep.\n'+fits.join('\n')+'\n'+applied+' EVI2min is unchanged.',style:{whiteSpace:'pre-wrap'}}));
+  addChartNote(ui.Label({value:spec.label+'; matched pixels and dates at the selected timestep. GE normalized to this run’s paired minimum and maximum.\n'+fits.join('\n')+'\n'+applied+' Fitted EVI2min is diagnostic; the configured EVI2min parameter is unchanged.',style:{whiteSpace:'pre-wrap'}}));
 
 }
 
@@ -3869,7 +3884,7 @@ UI.runButton = ui.Button({
 
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
-  {label: 'FAPAR = FIPAR; NDVImin fitted at GE = 0', value: 'FIPAR_GE'},
+  {label: 'FAPAR = FIPAR; NDVImin fitted at normalized GE = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
   {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'FIPAR',
