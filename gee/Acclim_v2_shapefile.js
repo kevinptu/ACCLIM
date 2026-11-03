@@ -19,7 +19,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
-  fexp: 0,                // Exponent applied once to every selected FAPAR method
+  fexp: 1,                // Exponent applied once to every selected FAPAR method
   fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
@@ -1225,8 +1225,8 @@ function computeDiagnostics(running, instant, params) {
   var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
   var FAPARmax=ee.Number(ee.Algorithms.If(instant.contains('FAPARmax'),instant.get('FAPARmax'),FAPAR));
   var fge=greenExcessMultiplier(instant.get('GE',0),p);
-  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM).divide(0.6);
-  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM).divide(0.6);
+  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
+  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
 
   // Mean daytime GPP
   var GPPday_mean_C3 = GPPmax_C3.multiply(p.GPPmean2GPPmax);
