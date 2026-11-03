@@ -19,6 +19,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
+  fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
   FAPARexp:       0,      // Seasonal FAPAR / running seasonal maximum exponent
@@ -66,7 +67,7 @@ var ACCLIM_PARAMS = {
   // Intercepted PAR fraction used for water and energy partitioning.
   ndvi_min: 0, // Used unless the GE′=0 NDVImin option is selected.
   ndvi_max: 1,
-  ndvi_exp: 1
+  ndvi_exp: 1.6
 };
 
 var DATASETS = {
@@ -1113,6 +1114,11 @@ function photosyntheticFAPAR(instant, p) {
   return FAPAR;
 }
 
+function greenExcessMultiplier(ge,p) {
+  if(p.fge_exp===0)return ee.Number(1);
+  // Bound the base before a fractional power to avoid negative-base NaNs.
+  return ee.Number(ge).divide(0.1).max(0).min(1).pow(p.fge_exp);
+}
 function computeDiagnostics(running, instant, params) {
   var p = params;
 
@@ -1213,8 +1219,9 @@ function computeDiagnostics(running, instant, params) {
   var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
   var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
   var FAPARmax=ee.Number(ee.Algorithms.If(instant.contains('FAPARmax'),instant.get('FAPARmax'),FAPAR));
-  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
-  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
+  var fge=greenExcessMultiplier(instant.get('GE',0),p);
+  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM).multiply(fge);
+  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM).multiply(fge);
 
   // Mean daytime GPP
   var GPPday_mean_C3 = GPPmax_C3.multiply(p.GPPmean2GPPmax);
@@ -1312,6 +1319,7 @@ function computeDiagnostics(running, instant, params) {
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR,
     FAPARmax: FAPARmax, fM: fM, FAPARexp: p.FAPARexp,
+    fge:fge, fge_exp:p.fge_exp, GE_for_GPP:ee.Algorithms.If(instant.contains('GE'),instant.get('GE',0),null),
     FIPAR:            FIPAR,
     FPAR_mode: p.useSharedFPAR ? 'shared FAPAR' : 'separate FAPAR/FIPAR',
     GPPmax_C3:        GPPmax_C3,
@@ -1431,7 +1439,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
-  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR')});
+  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR'),GE:f.get('GE')});
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
@@ -1910,9 +1918,15 @@ function applySharedFPAR(f, p) {
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
+  if(typeof p.fge_exp!=='number'||!isFinite(p.fge_exp)||p.fge_exp<0)throw new Error('fge_exp must be finite and nonnegative.');
   forcingFC=forcingFC.map(withPeriodTiming);
+  if(p.fge_exp>0)forcingFC=forcingFC.map(function(f){
+    var hasGE=f.toDictionary(['GE']).size().gt(0);
+    return f.set({model_valid:ee.Algorithms.If(hasGE,f.get('model_valid'),0),GE_missing_for_GPP:hasGE.not()});
+  });
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
+  if(p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
   if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
@@ -2186,6 +2200,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       if(historicalFit){d.ndvi_min_p05=historicalFit.ndvi;d.evi2_min_p05=historicalFit.evi2;d.vi_baseline_n=historicalFit.n;d.vi_baseline_start=historicalFit.start;d.vi_baseline_end=historicalFit.end;d.vi_baseline_first_observation=historicalFit.first;d.vi_baseline_last_observation=historicalFit.last;}
       if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
         d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;}
+      d.GE_missing_for_GPP=params.fge_exp>0&&!carbonFinite(d.GE);d.fge_exp=params.fge_exp;
       d.GE_source=spec.label;d.GE_scale_m=spec.scale;d.GE_status=carbonFinite(d.GE)?'available':'unavailable';return d;
     });
     done(ee.FeatureCollection(enriched.map(function(r){return ee.Feature(geom,r);})).sort('millis'));
@@ -2201,6 +2216,14 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   function simulate() {
     setStatus('Aligning satellite observations with weather timesteps...');
     materialize(assembleSelectedForcing(geom,start,end,cfg),function(rows,forcing) {
+      var geByDate={};gePeriods.forEach(function(r){geByDate[r.date]=r;});
+      rows=rows.map(function(r){var d=mergeParams(r,{}),g=geByDate[r.date];
+        d.GE=g&&carbonFinite(g.GE)?g.GE:null;
+        d.GE_missing_for_GPP=params.fge_exp>0&&!carbonFinite(d.GE);
+        if(d.GE_missing_for_GPP)d.model_valid=0;
+        return d;
+      });
+      forcing=ee.FeatureCollection(rows.map(function(r){return ee.Feature(geom,r);}));
       if(!rows.some(function(r){return r.model_valid===1||r.model_valid===true;})){complete(rows);return;}
       setStatus('Calculating native '+rows[0].model_cadence+' physiology...');
       materialize(runACCLIM(forcing,mergeParams(params,{deferBuckets:true})),function(baselineRows,baseline) {
@@ -2258,7 +2281,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   }
   fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
     if(request!==UI._requestId)return;
-    if(error&&params.fitNDVIminGE){done(null,error);return;}
+    if(error&&(params.fitNDVIminGE||params.fge_exp>0)){done(null,error);return;}
     try{
       gePeriods=diagnostic||[];
       if(params.fitNDVIminGE){ndviFit=ndviMinGEFit(gePeriods,params);params.ndvi_min=ndviFit.intercept;}

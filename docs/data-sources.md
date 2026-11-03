@@ -132,6 +132,12 @@ Each candidate is evaluated against the whole pooled cloud, not only its origina
 
 Candidate geometric score is `3 × below_fraction + max(0, 1 − supported_span) + (1 − enclosure) + max(0, 4 − supported_bins)`. Only candidates passing the above support checks enter the plausible-geometry comparison. If none passes, the best geometric exploratory fit is displayed rather than reporting that soil does not exist. Numerical/insufficient-data cases still return no fit.
 
+### Green-excess GPP multiplier
+
+`fge_exp` defaults to 1. Both C3 and C4 GPP capacities include `fge = clamp(GE / 0.1, 0, 1)^fge_exp`, in addition to the existing fD and fM factors. Raw selected-timestep GE from the paired GE diagnostic source is joined to forcing before physiology, including the MODIS RGB companion products. This does not change FAPAR or use the conditional GE normalization used by the baseline regressions. Negative GE yields zero, GE at or above 0.1 yields one, and clamping before exponentiation handles fractional exponents safely. `fge_exp = 0` disables the multiplier. Exponents must be finite and nonnegative.
+
+With the multiplier enabled, missing GE marks the physiological timestep unavailable under the existing missing-forcing and bucket-bridging rules. A failed GE fetch is reported rather than silently replacing it. Exports include `fge`, `fge_exp`, `GE_for_GPP` and `GE_missing_for_GPP`. Both capacities and downstream carbon fluxes receive the multiplier once.
+
 ### Ten-year fifth-percentile FAPAR option
 
 The optional **FAPAR = FIPAR; VI minima = 10-year fifth percentiles** choice uses the selected location and satellite source for the ten calendar years preceding the run start date, excluding the start date itself. A February 29 lookback starts February 28 if the earlier year is not a leap year. The default remains ordinary FAPAR = FIPAR.
