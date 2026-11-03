@@ -19,6 +19,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
+  fexp: 1,                // Exponent applied once to every selected FAPAR method
   fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
@@ -1099,7 +1100,7 @@ function computeFIPAR(ndvi, p) {
  * Returns a dictionary of all derived quantities to attach to the output feature.
  */
 function photosyntheticFAPAR(instant, p) {
-  if (p.faparMethod === 'FIPAR') return ee.Number(instant.get('FIPAR'));
+  if (p.faparMethod === 'FIPAR') return ee.Number(instant.get(p.useSharedFPAR?'FIPAR_NDVI':'FIPAR')).pow(p.fexp);
   var FAPAR_in = ee.Number(instant.get('EVI2'));
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
@@ -1111,7 +1112,7 @@ function photosyntheticFAPAR(instant, p) {
     FAPAR = ee.Number(ee.Algorithms.If(p.faparFit.valid, scaledEVI2, FAPAR));
   }
 
-  return FAPAR;
+  return FAPAR.pow(p.fexp);
 }
 
 function greenExcessMultiplier(ge,p) {
@@ -1184,7 +1185,7 @@ function computeDiagnostics(running, instant, params) {
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
   var faparFiparValid = FIPAR.gt(1e-9);
-  var faparFiparRatio = (p.useSharedFPAR || p.faparMethod === 'FIPAR') ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
+  var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
   var zC3 = zCoef.multiply(
@@ -1317,7 +1318,7 @@ function computeDiagnostics(running, instant, params) {
     piC4_mean:        piC4_mean,
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
-    FAPAR:            FAPAR,
+    FAPAR:            FAPAR, fexp:p.fexp,
     FAPARmax: FAPARmax, fM: fM, FAPARexp: p.FAPARexp,
     fge:fge, fge_exp:p.fge_exp, GE_for_GPP:ee.Algorithms.If(instant.contains('GE'),instant.get('GE',0),null),
     FIPAR:            FIPAR,
@@ -1439,7 +1440,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
-  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR'),GE:f.get('GE')});
+  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE')});
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
@@ -1901,7 +1902,7 @@ function fixedUpperEVI2Fit(fit) {
 // Called after fitting, before initialization: use the same fraction everywhere.
 function applySharedFPAR(f, p) {
   var rawFIPAR = f.getNumber('FIPAR');
-  var shared = photosyntheticFAPAR(f, p);
+  var shared = photosyntheticFAPAR(f, mergeParams(p,{useSharedFPAR:false}));
   var emSurface = shared.multiply(p.em_v).add(ee.Number(1).subtract(shared).multiply(p.em_nv));
   var kelvin = f.getNumber('Tdaily').add(273.15);
   var emAir = ee.Number(10).multiply(f.getNumber('ea')).divide(kelvin).pow(1 / 7).multiply(1.31);
@@ -1918,6 +1919,7 @@ function applySharedFPAR(f, p) {
 function runACCLIM(forcingFC, params) {
   // Merge param overrides (ES5-safe; GEE Code Editor lacks Object.assign).
   var p = mergeParams(ACCLIM_PARAMS, params || {});
+  if(typeof p.fexp!=='number'||!isFinite(p.fexp)||p.fexp<0)throw new Error('fexp must be finite and nonnegative.');
   if(typeof p.fge_exp!=='number'||!isFinite(p.fge_exp)||p.fge_exp<0)throw new Error('fge_exp must be finite and nonnegative.');
   forcingFC=forcingFC.map(withPeriodTiming);
   if(p.fge_exp>0)forcingFC=forcingFC.map(function(f){

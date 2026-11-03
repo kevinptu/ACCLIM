@@ -134,6 +134,8 @@ Candidate geometric score is `3 × below_fraction + max(0, 1 − supported_span)
 
 ### Green-excess GPP multiplier
 
+All FAPAR methods apply `FAPAR = FAPAR_base^fexp` after selecting or scaling the base value. `fexp` defaults to 1 (unchanged results) and must be finite and nonnegative. This includes FIPAR methods, fixed/fitted EVI2, and NDVI fallback. The resulting value supplies photosynthesis, seasonal FAPARmax/fM, LAI, and the FAPAR/FIPAR ratio in ci calculations. With shared FPAR enabled, water/energy partitioning uses the same exponentiated fraction, applied only once; otherwise water FIPAR is unchanged. CSV outputs include `fexp`. This parameter is distinct from `FAPARexp`, the seasonal fM exponent.
+
 `fge_exp` defaults to 1. Both C3 and C4 GPP capacities include `fge = clamp(GE / 0.1, 0, 1)^fge_exp`, in addition to the existing fD and fM factors. Raw selected-timestep GE from the paired GE diagnostic source is joined to forcing before physiology, including the MODIS RGB companion products. This does not change FAPAR or use the conditional GE normalization used by the baseline regressions. Negative GE yields zero, GE at or above 0.1 yields one, and clamping before exponentiation handles fractional exponents safely. `fge_exp = 0` disables the multiplier. Exponents must be finite and nonnegative.
 
 With the multiplier enabled, missing GE marks the physiological timestep unavailable under the existing missing-forcing and bucket-bridging rules. A failed GE fetch is reported rather than silently replacing it. Exports include `fge`, `fge_exp`, `GE_for_GPP` and `GE_missing_for_GPP`. Both capacities and downstream carbon fluxes receive the multiplier once.
