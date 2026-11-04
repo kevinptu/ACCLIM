@@ -1147,6 +1147,17 @@ function computeFIPAR(ndvi, p, ge) {
 // EVI2_FITTED_MIN: same fitted lo, hi = 0.6; B = clamp01((EVI2-lo)/(0.6-lo)).
 // Invalid EVI2 fits fall back to B = NDVI^2. fexp is applied after that fallback too.
 function photosyntheticFAPAR(instant, p) {
+  // NIRV: NIRv = NIR * NDVI; B = max(0, NIRv); FAPAR = B^fexp.
+  if (p.faparMethod === 'NIRV') {
+    return ee.Number(instant.get('nir')).multiply(ee.Number(instant.get('NDVI'))).max(0).pow(p.fexp);
+  }
+  // NDVI_RED_EXP: B = max(0,NDVI)^(R*0.5 + (1-R)*2), with R = red reflectance.
+  // FAPAR = B^fexp. Reflectance uses fractions (0-1).
+  if (p.faparMethod === 'NDVI_RED_EXP') {
+    var red = ee.Number(instant.get('red'));
+    var exponent = red.multiply(0.5).add(ee.Number(1).subtract(red).multiply(2));
+    return ee.Number(instant.get('NDVI')).max(0).pow(exponent).pow(p.fexp);
+  }
   // NDVI_GE_OFFSET: B = max(0, max(0, NDVI)^ndvi_exp - ndvi_min).
   // ndvi_min is the NDVI-versus-GEprime intercept fitted before forcing assembly.
   if (p.faparMethod === 'NDVI_GE_OFFSET') {
@@ -1514,7 +1525,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
-  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
+  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, red:f.get('red'),nir:f.get('nir'),FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
@@ -2000,10 +2011,16 @@ function runACCLIM(forcingFC, params) {
     var hasGE=f.toDictionary(['GE']).size().gt(0);
     return f.set({model_valid:ee.Algorithms.If(hasGE,f.get('model_valid'),0),GE_missing_for_GPP:hasGE.not()});
   });
+  var reflectanceField = p.faparMethod === 'NIRV' ? 'nir' : p.faparMethod === 'NDVI_RED_EXP' ? 'red' : null;
+  if (reflectanceField) forcingFC = forcingFC.map(function(f) {
+    var available = f.toDictionary([reflectanceField]).size().gt(0);
+    return f.set('model_valid', ee.Algorithms.If(available, f.get('model_valid'), 0));
+  });
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
+  if (reflectanceField) forcingFC = forcingFC.filter(ee.Filter.notNull([reflectanceField]));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if((p.faparMethod==='FGE' || p.faparMethod==='GE_NDVI_MIN' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET') throw new Error('Unknown FAPAR method.');
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET' && p.faparMethod !== 'NIRV' && p.faparMethod !== 'NDVI_RED_EXP') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -2273,6 +2290,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     var spec=geSourceSpec(cfg.satelliteSource||'MODIS16');
     var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0});
       d.evi2_min_ge=eviFit?eviFit.intercept:null;d.ndvi_min_ge=ndviDiagnosticFit?ndviDiagnosticFit.intercept:null;
+      d.NIRv=carbonFinite(d.nir)&&carbonFinite(d.NDVI)?d.nir*d.NDVI:null;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
       d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':'configured';
@@ -4042,6 +4060,8 @@ UI.runButton = ui.Button({
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = NDVI²', value: 'NDVI'},
+  {label: 'FAPAR = NIRv (NIR × NDVI)', value: 'NIRV'},
+  {label: 'FAPAR = NDVI^(R × 0.5 + (1 − R) × 2)', value: 'NDVI_RED_EXP'},
   {label: 'FAPAR = NDVI^ndvi_exp − fitted NDVImin (GE′ = 0)', value: 'NDVI_GE_OFFSET'},
   {label: 'FAPAR = fge', value: 'FGE'},
   {label: 'FAPAR = min(fge, NDVI^ndvi_exp)', value: 'GE_NDVI_MIN'},
@@ -4683,7 +4703,7 @@ function onRun() {
       }
       try {
     var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
@@ -4721,9 +4741,9 @@ function onRun() {
       conductanceChart.setOptions(conductanceOptions);
       chartCache.ready.forEach(function(ready) { ready(); });
       chartCache.ready = [];
-      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge'],
-        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge'],
-        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60'], [2, 3, 4, 5, 6, 7], {
+      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge', 'NIRv'],
+        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge', 'NIRv'],
+        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60', '#43A047'], [2, 3, 4, 5, 6, 7, 8], {
           series: {0: {color: '#000000', lineDashStyle: [6, 4]},
             1: {color: '#1976D2', lineDashStyle: [6, 4]},
             2: {color: '#2E7D32'}, 3: {color: '#8E24AA'},
