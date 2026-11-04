@@ -19,10 +19,11 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
+  GE_scale: 0.07,        // GE reference used by fge = clamp01(GE / GE_scale)^fge_exp
   blend_exp: 1.6,          // NDVI exponent controlling the weight in both blend options
   fiparMethod: 'NDVI',    // NDVI scaling or NDVI-weighted GE blend
   fexp: 1,                // Exponent applied once to every selected FAPAR method
-  fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
+  fge_exp: 1,             // Raw GE / GE_scale exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
   fMexp:       0,      // Seasonal FAPAR / running seasonal maximum exponent
@@ -1146,6 +1147,11 @@ function computeFIPAR(ndvi, p, ge) {
 // EVI2_FITTED_MIN: same fitted lo, hi = 0.6; B = clamp01((EVI2-lo)/(0.6-lo)).
 // Invalid EVI2 fits fall back to B = NDVI^2. fexp is applied after that fallback too.
 function photosyntheticFAPAR(instant, p) {
+  // NDVI_GE_OFFSET: B = max(0, max(0, NDVI)^ndvi_exp - ndvi_min).
+  // ndvi_min is the NDVI-versus-GEprime intercept fitted before forcing assembly.
+  if (p.faparMethod === 'NDVI_GE_OFFSET') {
+    return ee.Number(instant.get('NDVI')).max(0).pow(p.ndvi_exp).subtract(p.ndvi_min).max(0).pow(p.fexp);
+  }
   if (p.faparMethod === 'GE_NDVI_MIN') {
     var geForMinimum = p.fge_exp === 0 ? 0 : instant.get('GE');
     var fgeForMinimum = greenExcessMultiplier(geForMinimum, p);
@@ -1186,7 +1192,7 @@ function ndviBlendWeight(ndvi, p) {
 function greenExcessMultiplier(ge,p) {
   if(p.fge_exp===0)return ee.Number(1);
   // Bound the base before a fractional power to avoid negative-base NaNs.
-  return ee.Number(ge).divide(0.07).max(0).min(1).pow(p.fge_exp);
+  return ee.Number(ge).divide(p.GE_scale).max(0).min(1).pow(p.fge_exp);
 }
 function computeDiagnostics(running, instant, params) {
   var p = params;
@@ -1997,7 +2003,7 @@ function runACCLIM(forcingFC, params) {
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if((p.faparMethod==='FGE' || p.faparMethod==='GE_NDVI_MIN' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN') throw new Error('Unknown FAPAR method.');
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -2258,6 +2264,7 @@ function fetchHistoricalVIMinima(geom,start,key,params,request,done) {
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
   params=mergeParams(ACCLIM_PARAMS,params||{});
+  if(params.faparMethod==='NDVI_GE_OFFSET')params.fitNDVIminGE=true;
   var gePeriods=[],ndviFit,historicalFit;
   function complete(rows){
     gePeriods=normalizeGE(gePeriods);
@@ -2266,6 +2273,8 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     var spec=geSourceSpec(cfg.satelliteSource||'MODIS16');
     var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0});
       d.evi2_min_ge=eviFit?eviFit.intercept:null;d.ndvi_min_ge=ndviDiagnosticFit?ndviDiagnosticFit.intercept:null;
+      d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
+      d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
       d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':'configured';
       if(historicalFit){d.ndvi_min_p05=historicalFit.ndvi;d.evi2_min_p05=historicalFit.evi2;d.vi_baseline_n=historicalFit.n;d.vi_baseline_start=historicalFit.start;d.vi_baseline_end=historicalFit.end;d.vi_baseline_first_observation=historicalFit.first;d.vi_baseline_last_observation=historicalFit.last;}
       if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
@@ -4033,6 +4042,7 @@ UI.runButton = ui.Button({
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = NDVI²', value: 'NDVI'},
+  {label: 'FAPAR = NDVI^ndvi_exp − fitted NDVImin (GE′ = 0)', value: 'NDVI_GE_OFFSET'},
   {label: 'FAPAR = fge', value: 'FGE'},
   {label: 'FAPAR = min(fge, NDVI^ndvi_exp)', value: 'GE_NDVI_MIN'},
   {label: 'FAPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'},
@@ -4044,6 +4054,37 @@ UI.faparSelector = ui.Select({items: [
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
+UI.vegetationParameters = {};
+[
+  {key:'GE_scale', label:'GE_scale'},
+  {key:'ndvi_exp', label:'ndvi_exp'},
+  {key:'EVI2min', label:'EVI2min'},
+  {key:'EVI2max', label:'EVI2max'},
+  {key:'ndvi_min', label:'NDVImin'},
+  {key:'ndvi_max', label:'NDVImax'}
+].forEach(function(parameter) {
+  UI.inputPanel.add(ui.Label(parameter.label));
+  var input = ui.Textbox({value:String(ACCLIM_PARAMS[parameter.key]), style:{stretch:'horizontal'}});
+  UI.vegetationParameters[parameter.key] = input;
+  UI.inputPanel.add(input);
+});
+UI.inputPanel.add(ui.Label('Fitted/percentile methods estimate their bounds for each run. The fixed-maximum experiment uses EVI2max = 0.6.'));
+function readVegetationParameters() {
+  var values = {};
+  Object.keys(UI.vegetationParameters).forEach(function(key) {
+    var text = UI.vegetationParameters[key].getValue().trim();
+    var value = Number(text);
+    if (!text || !isFinite(value)) throw new Error(key + ' must be a finite number.');
+    values[key] = value;
+  });
+  if (values.GE_scale <= 0) throw new Error('GE_scale must be positive.');
+  if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
+  if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
+  if (values.EVI2max <= values.EVI2min) throw new Error('EVI2max must exceed EVI2min.');
+  return values;
+}
+
 UI.sharedFPAR = ui.Checkbox({label: 'Use FAPAR for both photosynthesis and water fluxes', value: false});
 UI.inputPanel.add(UI.sharedFPAR);
 UI.inputPanel.add(ui.Label('FIPAR method (before optional shared FAPAR override)'));
@@ -4617,6 +4658,7 @@ function onRun() {
   setStatus('Assembling forcing data…');
 
   try {
+    var manualParameters = readVegetationParameters();
     if (carbonDateMillis(endDate) < carbonDateMillis(startDate))
       throw new Error('End date must be on or after start date.');
     UI._runWeatherPlan=null;
@@ -4641,7 +4683,7 @@ function onRun() {
       }
       try {
     var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
@@ -4679,9 +4721,9 @@ function onRun() {
       conductanceChart.setOptions(conductanceOptions);
       chartCache.ready.forEach(function(ready) { ready(); });
       chartCache.ready = [];
-      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI'],
-        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI'],
-        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00'], [2, 3, 4], {
+      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge'],
+        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge'],
+        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60'], [2, 3, 4, 5, 6, 7], {
           series: {0: {color: '#000000', lineDashStyle: [6, 4]},
             1: {color: '#1976D2', lineDashStyle: [6, 4]},
             2: {color: '#2E7D32'}, 3: {color: '#8E24AA'},
