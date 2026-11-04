@@ -790,12 +790,17 @@ function assembleSelectedForcing(geom,start,end,config) {
     var matches=weather.filter(ee.Filter.eq('millis',t));
     var wf=ee.Feature(ee.Algorithms.If(matches.size(),matches.first(),ee.Feature(null,{})));
     var vi=satellite.filter(ee.Filter.gte('millis',t)).filter(ee.Filter.lt('millis',t.add(days.multiply(86400000))));
-    var valid=vi.filter(ee.Filter.notNull(['red','nir']));
+    var valid=vi.filter(ee.Filter.notNull(['red','nir','NDVI','EVI2']));
+    var monthly = cadence === 'monthly';
+    var usableSatellite = monthly ? valid.size().gt(0) : valid.size().eq(days);
     var props=ee.Dictionary({});
     // Unavailable satellite periods have null means; Dictionary.set rejects null.
     // Omit those properties so the existing completeness check flags the period.
     ['red','nir','NDVI','EVI2','GE','GE_available_pct','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){
-      var mean=vi.aggregate_mean(k);
+      var isReflectanceOrIndex = ['red','nir','NDVI','EVI2'].indexOf(k) >= 0;
+      var mean = monthly && isReflectanceOrIndex
+        ? valid.reduceColumns(ee.Reducer.median(), [k]).get('median')
+        : vi.aggregate_mean(k);
       props=ee.Dictionary(ee.Algorithms.If(ee.Algorithms.IsEqual(mean,null),props,props.set(k,mean)));
     });
     if (config.gePeriods) {
@@ -809,7 +814,7 @@ function assembleSelectedForcing(geom,start,end,config) {
     var dl=ee.Number(ee.List.sequence(0,days.subtract(1)).map(function(i){
       return astronomicalDaylength(lat,doyFromDate(ee.Date(t).advance(i,'day')));
     }).reduce(ee.Reducer.mean()));
-    var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(valid.size().eq(days)).and(dl.gt(0));
+    var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(usableSatellite).and(dl.gt(0));
     if(p.fiparMethod==='NDVI_BLEND' && p.fge_exp>0)complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('GE'),1,0)));
     if(config.weatherPlan)complete=complete.and(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('tower_weather_valid'),null),0,wf.get('tower_weather_valid'))).eq(1));
     return f.setGeometry(geom).set(wf.toDictionary()).set(props).set({
@@ -819,8 +824,13 @@ function assembleSelectedForcing(geom,start,end,config) {
       model_valid:complete,weather_missing_pct:ee.Number(7).subtract(wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','precip']).size()).multiply(100/7),
       precipitation_missing_pct:ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('precip'),null),100,0),
       satellite_source:sat,satellite_scale_m:SATELLITE_SOURCES[sat].scale,
+      satellite_valid_days:valid.size(),
+      satellite_missing_pct:ee.Number(1).subtract(valid.size().divide(days)).multiply(100),
+      satellite_unavailable_pct:ee.Number(1).subtract(valid.size().divide(days)).multiply(100),
+      satellite_unobserved_pct:ee.Number(1).subtract(valid.filter(ee.Filter.eq('satellite_status','observed')).size().divide(days)).multiply(100),
+      satellite_aggregation:monthly?'median of available daily values after gap filling':'mean with complete daily coverage',
       satellite_date_basis:ee.Feature(vi.first()).get('satellite_date_basis'),
-      satellite_status:ee.Algorithms.If(valid.size().eq(days),ee.Algorithms.If(vi.aggregate_sum('satellite_missing_pct'),'interpolated','observed'),'unavailable'),
+      satellite_status:ee.Algorithms.If(usableSatellite,ee.Algorithms.If(valid.size().lt(days),'partial',ee.Algorithms.If(vi.aggregate_sum('satellite_missing_pct'),'interpolated','observed')),'unavailable'),
       satellite_gap_days:vi.aggregate_max('satellite_gap_days'),satellite_left_date:ee.Feature(vi.sort('millis').first()).get('satellite_left_date'),
       satellite_right_date:ee.Feature(vi.sort('millis',false).first()).get('satellite_right_date'),satellite_max_gap_days:SATELLITE_SOURCES[sat].gap});
   });
@@ -2034,7 +2044,7 @@ function finishACCLIM(baseline, params) {
       .cat(['date','millis','period_days','daylength','period_seconds','daylight_seconds','period_start_millis','period_end_millis','period_end_exclusive','elapsed_seconds','model_cadence','model_valid','weather_source',
         'weather_missing_pct','weather_dataset','weather_scale_m','weather_source_missing_pct','weather_gapfill_provenance',
         'weather_source_cadence','weather_temporally_allocated_pct','weather_temporal_method','weather_missing_day_pct',
-        'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_status',
+        'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_unobserved_pct','satellite_valid_days','satellite_aggregation','satellite_status',
         'satellite_date_basis','satellite_gap_days','satellite_left_date','satellite_right_date','satellite_max_gap_days',
         'Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','NDVI','EVI2','red','nir','GE','GE_available_pct',
         'precip','precip_units','fSM_mean','fSM_et_mean']);
@@ -4652,6 +4662,17 @@ function onRun() {
       chartCache.rows = rows;
       output = carbonRowsToFC(rows);
       addRemainingDiagnosticCharts();
+      if (UI._lastRun.timestep === 'monthly') {
+        addResultChart(ui.Chart.feature.byFeature(output, 'date', ['satellite_missing_pct'])
+          .setOptions({
+            title: regionChartTitle('Monthly satellite missing data', regionName),
+            hAxis: {title: 'Date'},
+            vAxis: {title: 'Missing NDVI/EVI2 days (%)', viewWindow: {min: 0, max: 100}},
+            legend: {position: 'none'}, lineWidth: 1, pointSize: 3, interpolateNulls: false
+          }));
+        addChartNote(ui.Label('Monthly NDVI/EVI2 use the median of available daily values after gap filling. Missing percentage counts days still unavailable.'));
+      }
+
       var resistance = rows.map(function(row) { return row.rs; }).filter(carbonFinite);
       var conductanceOptions = conductanceChart.getOptions();
       conductanceOptions.vAxes[1].viewWindow.max = resistance.length ? 10 * Math.min.apply(null, resistance) : 1000;
