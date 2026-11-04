@@ -15,8 +15,13 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
    assert(Math.abs(result-(ndvi*.6+(1-ndvi)*.2)**2)<1e-12);
   }
  }
+ vm.runInContext(s.slice(s.indexOf('function computeFIPAR('),s.indexOf('/**',s.indexOf('function computeFIPAR('))),c);
+ for(const n of [-.1,0,.5,1]){
+  const expected=Math.max(0,n)**2.6+(1-Math.max(0,n))*.2;
+  assert(Math.abs(c.computeFIPAR(n,{fiparMethod:'NDVI_BLEND',fge_exp:1},scale*.2).v-expected)<1e-12);
+ }
  for(const key of ['GPPmax_C3','GPPmax_C4'])assert(!s.match(new RegExp('var '+key+' =[^;]+;'))[0].includes('fge'));
- assert(s.includes("if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']))"));
+ assert(s.includes("if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']))"));
  assert(s.includes('d.GE=g&&carbonFinite(g.GE)?g.GE:null;'));
 }
 console.log('PASS raw GE attenuation, clipping, fractional exponent, disabled/missing GE, both GPP capacities and forcing wiring');
