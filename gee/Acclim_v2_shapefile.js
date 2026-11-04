@@ -19,7 +19,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
-  blend_exp: 1,          // NDVI exponent controlling the weight in both blend options
+  blend_exp: 1.6,          // NDVI exponent controlling the weight in both blend options
   fiparMethod: 'NDVI',    // NDVI scaling or NDVI-weighted GE blend
   fexp: 1,                // Exponent applied once to every selected FAPAR method
   fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
@@ -3995,6 +3995,7 @@ UI.runButton = ui.Button({
 
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
+  {label: 'FAPAR = NDVI²', value: 'NDVI'},
   {label: 'FAPAR = fge', value: 'FGE'},
   {label: 'FAPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'},
   {label: 'FAPAR = FIPAR; VI minima = 10-year fifth percentiles', value: 'FIPAR_P05'},
@@ -4602,7 +4603,7 @@ function onRun() {
       }
       try {
     var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
