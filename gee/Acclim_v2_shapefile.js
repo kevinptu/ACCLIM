@@ -19,6 +19,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
+  blend_exp: 1,          // NDVI exponent controlling the weight in both blend options
   fiparMethod: 'NDVI',    // NDVI scaling or NDVI-weighted GE blend
   fexp: 1,                // Exponent applied once to every selected FAPAR method
   fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
@@ -1101,7 +1102,8 @@ function computeFIPAR(ndvi, p, ge) {
   if (p.fiparMethod === 'NDVI_BLEND') {
     var n = ee.Number(ndvi).max(0);
     var fge = greenExcessMultiplier(ge, p);
-    return n.multiply(n.pow(p.ndvi_exp)).add(ee.Number(1).subtract(n).multiply(fge));
+    var w = ndviBlendWeight(n, p);
+    return w.multiply(n.pow(p.ndvi_exp)).add(ee.Number(1).subtract(w).multiply(fge));
   }
   return ee.Number(ndvi).subtract(p.ndvi_min).max(0)
     .divide(p.ndvi_max - p.ndvi_min).pow(p.ndvi_exp);
@@ -1118,7 +1120,8 @@ function photosyntheticFAPAR(instant, p) {
     var fge = greenExcessMultiplier(ge, p);
     if (p.faparMethod === 'NDVI_BLEND') {
       var ndvi = ee.Number(instant.get('NDVI')).max(0);
-      return ndvi.multiply(ndvi.pow(p.ndvi_exp)).add(ee.Number(1).subtract(ndvi).multiply(fge)).pow(p.fexp);
+      var w = ndviBlendWeight(ndvi, p);
+      return w.multiply(ndvi.pow(p.ndvi_exp)).add(ee.Number(1).subtract(w).multiply(fge)).pow(p.fexp);
     }
     return fge.pow(p.fexp);
   }
@@ -1135,6 +1138,13 @@ function photosyntheticFAPAR(instant, p) {
   }
 
   return FAPAR.pow(p.fexp);
+}
+
+function ndviBlendWeight(ndvi, p) {
+  if (typeof p.blend_exp !== 'number' || !isFinite(p.blend_exp) || p.blend_exp < 0) {
+    throw new Error('blend_exp must be finite and nonnegative.');
+  }
+  return ee.Number(ndvi).max(0).pow(p.blend_exp);
 }
 
 function greenExcessMultiplier(ge,p) {
@@ -1340,7 +1350,7 @@ function computeDiagnostics(running, instant, params) {
     piC4_mean:        piC4_mean,
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
-    FAPAR:            FAPAR, fexp:p.fexp,
+    FAPAR:            FAPAR, fexp:p.fexp, blend_exp:p.blend_exp,
     FAPARmax: FAPARmax, fM: fM, fMexp: p.fMexp,
     fge:ee.Algorithms.If(instant.contains('GE'),fge,p.fge_exp===0?1:null), fge_exp:p.fge_exp, GE_for_GPP:ee.Algorithms.If(instant.contains('GE'),instant.get('GE',0),null),
     FIPAR:            FIPAR, FIPAR_method:p.fiparMethod,
@@ -3986,7 +3996,7 @@ UI.runButton = ui.Button({
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = fge', value: 'FGE'},
-  {label: 'FAPAR = NDVI × NDVI^ndvi_exp + (1 − NDVI) × fge', value: 'NDVI_BLEND'},
+  {label: 'FAPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'},
   {label: 'FAPAR = FIPAR; VI minima = 10-year fifth percentiles', value: 'FIPAR_P05'},
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
@@ -4001,12 +4011,13 @@ UI.inputPanel.add(ui.Label('FIPAR method (before optional shared FAPAR override)
 UI.fiparSelector = ui.Select({
   items: [
     {label: 'FIPAR = scaled NDVI', value: 'NDVI'},
-    {label: 'FIPAR = NDVI × NDVI^ndvi_exp + (1 − NDVI) × fge', value: 'NDVI_BLEND'}
+    {label: 'FIPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'}
   ],
   value: 'NDVI',
   style: {stretch: 'horizontal'}
 });
 UI.inputPanel.add(UI.fiparSelector);
+UI.inputPanel.add(ui.Label('Blend weight w = NDVI^blend_exp'));
 setupTowerImport();
 UI.weatherSelector=ui.Select({items:Object.keys(WEATHER_SOURCES).map(function(k){return {label:WEATHER_SOURCES[k].label,value:k};}),value:'TERRACLIMATE'});
 UI.satelliteSelector=ui.Select({items:Object.keys(SATELLITE_SOURCES).map(function(k){return {label:SATELLITE_SOURCES[k].label,value:k};}),value:'MODIS16'});
