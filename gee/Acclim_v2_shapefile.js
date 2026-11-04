@@ -23,7 +23,7 @@ var ACCLIM_PARAMS = {
   fge_exp: 1,             // Raw GE / 0.1 attenuation exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
-  FAPARexp:       0,      // Seasonal FAPAR / running seasonal maximum exponent
+  fMexp:       0,      // Seasonal FAPAR / running seasonal maximum exponent
   faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
@@ -1329,7 +1329,7 @@ function computeDiagnostics(running, instant, params) {
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR, fexp:p.fexp,
-    FAPARmax: FAPARmax, fM: fM, FAPARexp: p.FAPARexp,
+    FAPARmax: FAPARmax, fM: fM, fMexp: p.fMexp,
     fge:ee.Algorithms.If(instant.contains('GE'),fge,p.fge_exp===0?1:null), fge_exp:p.fge_exp, GE_for_GPP:ee.Algorithms.If(instant.contains('GE'),instant.get('GE',0),null),
     FIPAR:            FIPAR,
     FPAR_mode: p.useSharedFPAR ? 'shared FAPAR' : 'separate FAPAR/FIPAR',
@@ -1368,7 +1368,7 @@ function seasonalFAPARState(fapar,latitude,periodEnd,state,p) {
   var previous=ee.Number(ee.Algorithms.If(state.contains('FAPARmax'),state.get('FAPARmax'),fapar));
   var maximum=ee.Number(ee.Algorithms.If(reset,fapar,previous.max(fapar)));
   var ratio=ee.Number(ee.Algorithms.If(maximum.gt(0),ee.Number(fapar).divide(ee.Number(ee.Algorithms.If(maximum.gt(0),maximum,1))),0));
-  return ee.Dictionary({FAPARmax:maximum,fM:ratio.pow(p.FAPARexp),FAPAR_season:season,FAPARmax_reset:reset});
+  return ee.Dictionary({FAPARmax:maximum,fM:ratio.pow(p.fMexp),FAPAR_season:season,FAPARmax_reset:reset});
 }
 function acclimStep(currentFeat, prevState, params) {
   var state = ee.Dictionary(prevState);
@@ -1946,7 +1946,7 @@ function runACCLIM(forcingFC, params) {
       (!isFinite(p.EVI2min) || !isFinite(p.EVI2max) || p.EVI2max <= p.EVI2min)) {
     throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
   }
-  if(typeof p.FAPARexp!=='number'||!isFinite(p.FAPARexp)||p.FAPARexp<0)throw new Error('FAPARexp must be finite and nonnegative.');
+  if(typeof p.fMexp!=='number'||!isFinite(p.fMexp)||p.fMexp<0)throw new Error('fMexp must be finite and nonnegative.');
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
