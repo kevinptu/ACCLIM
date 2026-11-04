@@ -9,11 +9,11 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
   assert(Math.abs(c.photosyntheticFAPAR({get:k=>ge*scale/.1},{faparMethod:'FGE',fge_exp:1,fexp}).v-expected)<1e-12);
  }
  for(const [gePrime,ndvi,fexp,want] of [[.2,.6,1,.2],[.7,.3,1,.3],[.5,.5,2,.25],[.2,-.1,.5,0],[0,.6,1,0]]){
-  assert(Math.abs(c.photosyntheticFAPAR({get:k=>k==='GE_normalized'?gePrime:ndvi},{faparMethod:'GE_NDVI_MIN',fexp,ndvi_exp:1}).v-want)<1e-12);
+  assert(Math.abs(c.photosyntheticFAPAR({get:k=>k==='GE'?gePrime*scale:ndvi},{faparMethod:'GE_NDVI_MIN',fge_exp:1,fexp,ndvi_exp:1}).v-want)<1e-12);
  }
  for(const exponent of [1.25,1.6,2]){
   for(const [gePrime,ndvi] of [[.8,.5],[.1,.5],[.5,-.1],[0,.7]]){
-   const result=c.photosyntheticFAPAR({get:k=>k==='GE_normalized'?gePrime:ndvi},{faparMethod:'GE_NDVI_MIN',fexp:1,ndvi_exp:exponent}).v;
+   const result=c.photosyntheticFAPAR({get:k=>k==='GE'?gePrime*scale:ndvi},{faparMethod:'GE_NDVI_MIN',fge_exp:1,fexp:1,ndvi_exp:exponent}).v;
    assert(Math.abs(result-Math.min(gePrime,Math.max(0,ndvi)**exponent))<1e-12);
   }
  }
@@ -31,7 +31,7 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  }
  assert.throws(()=>c.ndviBlendWeight(.5,{blend_exp:-1}),/nonnegative/);
  for(const key of ['GPPmax_C3','GPPmax_C4'])assert(!s.match(new RegExp('var '+key+' =[^;]+;'))[0].includes('fge'));
- assert(s.includes("if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']))"));
+ assert(s.includes("if((p.faparMethod==='FGE' || p.faparMethod==='GE_NDVI_MIN' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']))"));
  assert(s.includes('d.GE=g&&carbonFinite(g.GE)?g.GE:null;'));
 }
 console.log('PASS raw GE attenuation, clipping, fractional exponent, disabled/missing GE, both GPP capacities and forcing wiring');
