@@ -1101,7 +1101,7 @@ function computeFIPAR(ndvi, p, ge) {
   if (p.fiparMethod === 'NDVI_BLEND') {
     var n = ee.Number(ndvi).max(0);
     var fge = greenExcessMultiplier(ge, p);
-    return n.multiply(n.pow(1.6)).add(ee.Number(1).subtract(n).multiply(fge));
+    return n.multiply(n.pow(p.ndvi_exp)).add(ee.Number(1).subtract(n).multiply(fge));
   }
   return ee.Number(ndvi).subtract(p.ndvi_min).max(0)
     .divide(p.ndvi_max - p.ndvi_min).pow(p.ndvi_exp);
@@ -1117,9 +1117,8 @@ function photosyntheticFAPAR(instant, p) {
     var ge = p.fge_exp === 0 ? 0 : instant.get('GE');
     var fge = greenExcessMultiplier(ge, p);
     if (p.faparMethod === 'NDVI_BLEND') {
-      var ndvi = ee.Number(instant.get('NDVI'));
-      var fipar = ee.Number(instant.get(p.useSharedFPAR ? 'FIPAR_NDVI' : 'FIPAR'));
-      return ndvi.multiply(fipar).add(ee.Number(1).subtract(ndvi).multiply(fge)).pow(p.fexp);
+      var ndvi = ee.Number(instant.get('NDVI')).max(0);
+      return ndvi.multiply(ndvi.pow(p.ndvi_exp)).add(ee.Number(1).subtract(ndvi).multiply(fge)).pow(p.fexp);
     }
     return fge.pow(p.fexp);
   }
@@ -3987,7 +3986,7 @@ UI.runButton = ui.Button({
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = fge', value: 'FGE'},
-  {label: 'FAPAR = NDVI × FIPAR + (1 − NDVI) × fge', value: 'NDVI_BLEND'},
+  {label: 'FAPAR = NDVI × NDVI^ndvi_exp + (1 − NDVI) × fge', value: 'NDVI_BLEND'},
   {label: 'FAPAR = FIPAR; VI minima = 10-year fifth percentiles', value: 'FIPAR_P05'},
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
@@ -4002,7 +4001,7 @@ UI.inputPanel.add(ui.Label('FIPAR method (before optional shared FAPAR override)
 UI.fiparSelector = ui.Select({
   items: [
     {label: 'FIPAR = scaled NDVI', value: 'NDVI'},
-    {label: 'FIPAR = NDVI × NDVI^1.6 + (1 − NDVI) × fge', value: 'NDVI_BLEND'}
+    {label: 'FIPAR = NDVI × NDVI^ndvi_exp + (1 − NDVI) × fge', value: 'NDVI_BLEND'}
   ],
   value: 'NDVI',
   style: {stretch: 'horizontal'}

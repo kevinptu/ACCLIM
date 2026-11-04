@@ -9,16 +9,16 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
   assert(Math.abs(c.photosyntheticFAPAR({get:k=>ge*scale/.1},{faparMethod:'FGE',fge_exp:1,fexp}).v-expected)<1e-12);
  }
  for(const shared of [false,true]){
-  for(const ndvi of [0,.5,1]){
+  for(const exponent of [1,1.6,2]) for(const ndvi of [-.1,0,.5,1]){
    const data={NDVI:ndvi,FIPAR:shared?.99:.6,FIPAR_NDVI:.6,GE:scale*.2};
-   const result=c.photosyntheticFAPAR({get:k=>data[k]},{faparMethod:'NDVI_BLEND',useSharedFPAR:shared,fge_exp:1,fexp:2}).v;
-   assert(Math.abs(result-(ndvi*.6+(1-ndvi)*.2)**2)<1e-12);
+   const result=c.photosyntheticFAPAR({get:k=>data[k]},{faparMethod:'NDVI_BLEND',useSharedFPAR:shared,fge_exp:1,fexp:2,ndvi_exp:exponent}).v;
+   assert(Math.abs(result-(Math.max(0,ndvi)**(1+exponent)+(1-Math.max(0,ndvi))*.2)**2)<1e-12);
   }
  }
  vm.runInContext(s.slice(s.indexOf('function computeFIPAR('),s.indexOf('/**',s.indexOf('function computeFIPAR('))),c);
- for(const n of [-.1,0,.5,1]){
-  const expected=Math.max(0,n)**2.6+(1-Math.max(0,n))*.2;
-  assert(Math.abs(c.computeFIPAR(n,{fiparMethod:'NDVI_BLEND',fge_exp:1},scale*.2).v-expected)<1e-12);
+ for(const exponent of [1,1.6,2]) for(const n of [-.1,0,.5,1]){
+  const expected=Math.max(0,n)**(1+exponent)+(1-Math.max(0,n))*.2;
+  assert(Math.abs(c.computeFIPAR(n,{fiparMethod:'NDVI_BLEND',fge_exp:1,ndvi_exp:exponent},scale*.2).v-expected)<1e-12);
  }
  for(const key of ['GPPmax_C3','GPPmax_C4'])assert(!s.match(new RegExp('var '+key+' =[^;]+;'))[0].includes('fge'));
  assert(s.includes("if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']))"));
