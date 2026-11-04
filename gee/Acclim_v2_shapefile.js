@@ -1100,9 +1100,15 @@ function computeFIPAR(ndvi, p) {
  * Returns a dictionary of all derived quantities to attach to the output feature.
  */
 function photosyntheticFAPAR(instant, p) {
-  if (p.faparMethod === 'FGE') {
+  if (p.faparMethod === 'FGE' || p.faparMethod === 'NDVI_BLEND') {
     var ge = p.fge_exp === 0 ? 0 : instant.get('GE');
-    return greenExcessMultiplier(ge, p).pow(p.fexp);
+    var fge = greenExcessMultiplier(ge, p);
+    if (p.faparMethod === 'NDVI_BLEND') {
+      var ndvi = ee.Number(instant.get('NDVI'));
+      var fipar = ee.Number(instant.get(p.useSharedFPAR ? 'FIPAR_NDVI' : 'FIPAR'));
+      return ndvi.multiply(fipar).add(ee.Number(1).subtract(ndvi).multiply(fge)).pow(p.fexp);
+    }
+    return fge.pow(p.fexp);
   }
   if (p.faparMethod === 'FIPAR') return ee.Number(instant.get(p.useSharedFPAR?'FIPAR_NDVI':'FIPAR')).pow(p.fexp);
   var FAPAR_in = ee.Number(instant.get('EVI2'));
@@ -1122,7 +1128,7 @@ function photosyntheticFAPAR(instant, p) {
 function greenExcessMultiplier(ge,p) {
   if(p.fge_exp===0)return ee.Number(1);
   // Bound the base before a fractional power to avoid negative-base NaNs.
-  return ee.Number(ge).divide(0.1).max(0).min(1).pow(p.fge_exp);
+  return ee.Number(ge).divide(0.07).max(0).min(1).pow(p.fge_exp);
 }
 function computeDiagnostics(running, instant, params) {
   var p = params;
@@ -1926,14 +1932,14 @@ function runACCLIM(forcingFC, params) {
   if(typeof p.fexp!=='number'||!isFinite(p.fexp)||p.fexp<0)throw new Error('fexp must be finite and nonnegative.');
   if(typeof p.fge_exp!=='number'||!isFinite(p.fge_exp)||p.fge_exp<0)throw new Error('fge_exp must be finite and nonnegative.');
   forcingFC=forcingFC.map(withPeriodTiming);
-  if(p.faparMethod==='FGE' && p.fge_exp>0)forcingFC=forcingFC.map(function(f){
+  if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.map(function(f){
     var hasGE=f.toDictionary(['GE']).size().gt(0);
     return f.set({model_valid:ee.Algorithms.If(hasGE,f.get('model_valid'),0),GE_missing_for_GPP:hasGE.not()});
   });
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
-  if(p.faparMethod==='FGE' && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE') throw new Error('Unknown FAPAR method.');
+  if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -2206,7 +2212,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       if(historicalFit){d.ndvi_min_p05=historicalFit.ndvi;d.evi2_min_p05=historicalFit.evi2;d.vi_baseline_n=historicalFit.n;d.vi_baseline_start=historicalFit.start;d.vi_baseline_end=historicalFit.end;d.vi_baseline_first_observation=historicalFit.first;d.vi_baseline_last_observation=historicalFit.last;}
       if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
         d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;}
-      d.GE_missing_for_GPP=(params.faparMethod==='FGE' && params.fge_exp>0)&&!carbonFinite(d.GE);d.fge_exp=params.fge_exp;
+      d.GE_missing_for_GPP=((params.faparMethod==='FGE' || params.faparMethod==='NDVI_BLEND') && params.fge_exp>0)&&!carbonFinite(d.GE);d.fge_exp=params.fge_exp;
       d.GE_source=spec.label;d.GE_scale_m=spec.scale;d.GE_status=carbonFinite(d.GE)?'available':'unavailable';return d;
     });
     done(ee.FeatureCollection(enriched.map(function(r){return ee.Feature(geom,r);})).sort('millis'));
@@ -2225,7 +2231,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       var geByDate={};gePeriods.forEach(function(r){geByDate[r.date]=r;});
       rows=rows.map(function(r){var d=mergeParams(r,{}),g=geByDate[r.date];
         d.GE=g&&carbonFinite(g.GE)?g.GE:null;
-        d.GE_missing_for_GPP=(params.faparMethod==='FGE' && params.fge_exp>0)&&!carbonFinite(d.GE);
+        d.GE_missing_for_GPP=((params.faparMethod==='FGE' || params.faparMethod==='NDVI_BLEND') && params.fge_exp>0)&&!carbonFinite(d.GE);
         if(d.GE_missing_for_GPP)d.model_valid=0;
         return d;
       });
@@ -2287,7 +2293,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   }
   fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
     if(request!==UI._requestId)return;
-    if(error&&(params.fitNDVIminGE||(params.faparMethod==='FGE' && params.fge_exp>0))){done(null,error);return;}
+    if(error&&(params.fitNDVIminGE||((params.faparMethod==='FGE' || params.faparMethod==='NDVI_BLEND') && params.fge_exp>0))){done(null,error);return;}
     try{
       gePeriods=diagnostic||[];
       if(params.fitNDVIminGE){ndviFit=ndviMinGEFit(gePeriods,params);params.ndvi_min=ndviFit.intercept;}
@@ -3967,6 +3973,7 @@ UI.runButton = ui.Button({
 UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = fge', value: 'FGE'},
+  {label: 'FAPAR = NDVI × FIPAR + (1 − NDVI) × fge', value: 'NDVI_BLEND'},
   {label: 'FAPAR = FIPAR; VI minima = 10-year fifth percentiles', value: 'FIPAR_P05'},
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
@@ -4561,7 +4568,7 @@ function onRun() {
       }
       try {
     var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, {useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
