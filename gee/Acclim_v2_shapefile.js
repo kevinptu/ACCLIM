@@ -801,6 +801,8 @@ function assembleSelectedForcing(geom,start,end,config) {
     if (config.gePeriods) {
       var geMatches = config.gePeriods.filter(ee.Filter.eq('date', f.get('date')));
       var geValue = ee.Feature(ee.Algorithms.If(geMatches.size(), geMatches.first(), ee.Feature(null, {}))).get('GE');
+      var gePrime = ee.Feature(ee.Algorithms.If(geMatches.size(), geMatches.first(), ee.Feature(null, {}))).get('GE_normalized');
+      props = ee.Dictionary(ee.Algorithms.If(ee.Algorithms.IsEqual(gePrime, null), props, props.set('GE_normalized', gePrime)));
       props = props.select(props.keys().remove('GE'));
       props = ee.Dictionary(ee.Algorithms.If(ee.Algorithms.IsEqual(geValue, null), props, props.set('GE', geValue)));
     }
@@ -1114,7 +1116,29 @@ function computeFIPAR(ndvi, p, ge) {
  * today's instantaneous values. Pure function of inputs; no side effects.
  * Returns a dictionary of all derived quantities to attach to the output feature.
  */
+// FAPAR menu equations. Each option first calculates B, then FAPAR = B^fexp.
+// clamp01(x) = min(1, max(0, x)); n = max(0, NDVI).
+// GEprime = (GE - GEmin)/(GEmax - GEmin) when GEmin < 0, otherwise GEprime = GE.
+// GE bounds use valid paired observations at the selected run timestep/date range.
+// FIPAR: B = selected FIPAR (before the optional shared-FAPAR override).
+//   Scaled NDVI FIPAR = [max(0, NDVI - ndvi_min)/(ndvi_max - ndvi_min)]^ndvi_exp.
+//   Blended FIPAR = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
+// FIPAR_GE: B = selected FIPAR with ndvi_min = intercept of NDVI versus GEprime.
+// FIPAR_P05: B = selected FIPAR with ndvi_min = P05(historical NDVI).
+//   EVI2min = P05(historical EVI2), using observations in the ten years before start.
+// NDVI: B = NDVI^2.
+// FGE: B = fge = clamp01(GE / GE_scale)^fge_exp; see greenExcessMultiplier for GE_scale.
+// NDVI_BLEND: B = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
+// GE_NDVI_MIN: B = max(0, min(GEprime, NDVI)). Missing GEprime gives an unavailable period.
+// EVI2_FIXED: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min)).
+// EVI2_FITTED: fit FIPAR = a + b*EVI2; lo = -a/b; hi = (1-a)/b.
+//   B = clamp01((EVI2 - lo)/(hi - lo)).
+// EVI2_FITTED_MIN: same fitted lo, hi = 0.6; B = clamp01((EVI2-lo)/(0.6-lo)).
+// Invalid EVI2 fits fall back to B = NDVI^2. fexp is applied after that fallback too.
 function photosyntheticFAPAR(instant, p) {
+  if (p.faparMethod === 'GE_NDVI_MIN') {
+    return ee.Number(instant.get('GE_normalized')).min(ee.Number(instant.get('NDVI'))).max(0).pow(p.fexp);
+  }
   if (p.faparMethod === 'FGE' || p.faparMethod === 'NDVI_BLEND') {
     var ge = p.fge_exp === 0 ? 0 : instant.get('GE');
     var fge = greenExcessMultiplier(ge, p);
@@ -1472,7 +1496,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
-  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE')});
+  var instant = ee.Dictionary({EVI2: EVI2, NDVI: NDVI, FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
@@ -1958,10 +1982,15 @@ function runACCLIM(forcingFC, params) {
     var hasGE=f.toDictionary(['GE']).size().gt(0);
     return f.set({model_valid:ee.Algorithms.If(hasGE,f.get('model_valid'),0),GE_missing_for_GPP:hasGE.not()});
   });
+  if(p.faparMethod==='GE_NDVI_MIN')forcingFC=forcingFC.map(function(f){
+    var available=f.toDictionary(['GE_normalized']).size().gt(0);
+    return f.set({model_valid:ee.Algorithms.If(available,f.get('model_valid'),0)});
+  });
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if((p.faparMethod==='FGE' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND') throw new Error('Unknown FAPAR method.');
+  if(p.faparMethod==='GE_NDVI_MIN')forcingFC=forcingFC.filter(ee.Filter.notNull(['GE_normalized']));
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN') throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -2253,6 +2282,8 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       var geByDate={};gePeriods.forEach(function(r){geByDate[r.date]=r;});
       rows=rows.map(function(r){var d=mergeParams(r,{}),g=geByDate[r.date];
         d.GE=g&&carbonFinite(g.GE)?g.GE:null;
+        d.GE_normalized=g&&carbonFinite(g.GE_normalized)?g.GE_normalized:null;
+        if(params.faparMethod==='GE_NDVI_MIN'&&!carbonFinite(d.GE_normalized))d.model_valid=0;
         d.GE_missing_for_GPP=((params.faparMethod==='FGE' || params.faparMethod==='NDVI_BLEND' || params.fiparMethod==='NDVI_BLEND') && params.fge_exp>0)&&!carbonFinite(d.GE);
         if(d.GE_missing_for_GPP)d.model_valid=0;
         return d;
@@ -2315,9 +2346,9 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   }
   fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
     if(request!==UI._requestId)return;
-    if(error&&(params.fitNDVIminGE||((params.faparMethod==='FGE' || params.faparMethod==='NDVI_BLEND' || params.fiparMethod==='NDVI_BLEND') && params.fge_exp>0))){done(null,error);return;}
+    if(error&&(params.faparMethod==='GE_NDVI_MIN'||params.fitNDVIminGE||((params.faparMethod==='FGE' || params.faparMethod==='NDVI_BLEND' || params.fiparMethod==='NDVI_BLEND') && params.fge_exp>0))){done(null,error);return;}
     try{
-      gePeriods=diagnostic||[];
+      gePeriods=normalizeGE(diagnostic||[]);
       cfg.gePeriods=ee.FeatureCollection(gePeriods.map(function(r){return ee.Feature(null,r);}));
       if(params.fitNDVIminGE){ndviFit=ndviMinGEFit(gePeriods,params);params.ndvi_min=ndviFit.intercept;}
       if(params.fitVIMinP05){
@@ -3997,6 +4028,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = NDVI²', value: 'NDVI'},
   {label: 'FAPAR = fge', value: 'FGE'},
+  {label: 'FAPAR = min(GE′, NDVI)', value: 'GE_NDVI_MIN'},
   {label: 'FAPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'},
   {label: 'FAPAR = FIPAR; VI minima = 10-year fifth percentiles', value: 'FIPAR_P05'},
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
@@ -4603,7 +4635,7 @@ function onRun() {
       }
       try {
     var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE', faparMethod: UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}, runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
