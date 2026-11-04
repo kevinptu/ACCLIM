@@ -9,7 +9,13 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
   assert(Math.abs(c.photosyntheticFAPAR({get:k=>ge*scale/.1},{faparMethod:'FGE',fge_exp:1,fexp}).v-expected)<1e-12);
  }
  for(const [gePrime,ndvi,fexp,want] of [[.2,.6,1,.2],[.7,.3,1,.3],[.5,.5,2,.25],[.2,-.1,.5,0],[0,.6,1,0]]){
-  assert(Math.abs(c.photosyntheticFAPAR({get:k=>k==='GE_normalized'?gePrime:ndvi},{faparMethod:'GE_NDVI_MIN',fexp}).v-want)<1e-12);
+  assert(Math.abs(c.photosyntheticFAPAR({get:k=>k==='GE_normalized'?gePrime:ndvi},{faparMethod:'GE_NDVI_MIN',fexp,ndvi_exp:1}).v-want)<1e-12);
+ }
+ for(const exponent of [1.25,1.6,2]){
+  for(const [gePrime,ndvi] of [[.8,.5],[.1,.5],[.5,-.1],[0,.7]]){
+   const result=c.photosyntheticFAPAR({get:k=>k==='GE_normalized'?gePrime:ndvi},{faparMethod:'GE_NDVI_MIN',fexp:1,ndvi_exp:exponent}).v;
+   assert(Math.abs(result-Math.min(gePrime,Math.max(0,ndvi)**exponent))<1e-12);
+  }
  }
  for(const shared of [false,true]){
   for(const weight of [0,1,1.6,2]) for(const exponent of [1,1.6,2]) for(const ndvi of [-.1,0,.5,1]){

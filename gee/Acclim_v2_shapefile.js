@@ -1129,7 +1129,7 @@ function computeFIPAR(ndvi, p, ge) {
 // NDVI: B = NDVI^2.
 // FGE: B = fge = clamp01(GE / GE_scale)^fge_exp; see greenExcessMultiplier for GE_scale.
 // NDVI_BLEND: B = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
-// GE_NDVI_MIN: B = max(0, min(GEprime, NDVI)). Missing GEprime gives an unavailable period.
+// GE_NDVI_MIN: B = max(0, min(GEprime, n^ndvi_exp)). Missing GEprime gives an unavailable period.
 // EVI2_FIXED: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min)).
 // EVI2_FITTED: fit FIPAR = a + b*EVI2; lo = -a/b; hi = (1-a)/b.
 //   B = clamp01((EVI2 - lo)/(hi - lo)).
@@ -1137,7 +1137,7 @@ function computeFIPAR(ndvi, p, ge) {
 // Invalid EVI2 fits fall back to B = NDVI^2. fexp is applied after that fallback too.
 function photosyntheticFAPAR(instant, p) {
   if (p.faparMethod === 'GE_NDVI_MIN') {
-    return ee.Number(instant.get('GE_normalized')).min(ee.Number(instant.get('NDVI'))).max(0).pow(p.fexp);
+    return ee.Number(instant.get('GE_normalized')).min(ee.Number(instant.get('NDVI')).max(0).pow(p.ndvi_exp)).max(0).pow(p.fexp);
   }
   if (p.faparMethod === 'FGE' || p.faparMethod === 'NDVI_BLEND') {
     var ge = p.fge_exp === 0 ? 0 : instant.get('GE');
@@ -4028,7 +4028,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR', value: 'FIPAR'},
   {label: 'FAPAR = NDVI²', value: 'NDVI'},
   {label: 'FAPAR = fge', value: 'FGE'},
-  {label: 'FAPAR = min(GE′, NDVI)', value: 'GE_NDVI_MIN'},
+  {label: 'FAPAR = min(GE′, NDVI^ndvi_exp)', value: 'GE_NDVI_MIN'},
   {label: 'FAPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'},
   {label: 'FAPAR = FIPAR; VI minima = 10-year fifth percentiles', value: 'FIPAR_P05'},
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
