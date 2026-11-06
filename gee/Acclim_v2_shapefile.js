@@ -26,7 +26,7 @@ var ACCLIM_PARAMS = {
   fge_exp: 1,             // Raw GE / GE_scale exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
-  fMexp:       0,      // Seasonal FAPAR / running seasonal maximum exponent
+  fMexp:       0.5,      // Seasonal FAPAR / running seasonal maximum exponent
   faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
@@ -4079,6 +4079,7 @@ UI.vegetationParameters = {};
 [
   {key:'GE_scale', label:'GE_scale'},
   {key:'ndvi_exp', label:'ndvi_exp'},
+  {key:'fMexp', label:'fMexp (seasonal FAPAR multiplier; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
   {key:'EVI2max', label:'EVI2max'},
   {key:'ndvi_min', label:'NDVImin'},
@@ -4099,6 +4100,7 @@ function readVegetationParameters() {
     values[key] = value;
   });
   if (values.GE_scale <= 0) throw new Error('GE_scale must be positive.');
+  if (values.fMexp < 0) throw new Error('fMexp must be nonnegative.');
   if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
   if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
   if (values.EVI2max <= values.EVI2min) throw new Error('EVI2max must exceed EVI2min.');
