@@ -9,6 +9,10 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  assert(Math.abs(c.photosyntheticFAPAR(instant,{faparMethod:'NIRV',fexp:1}).v-.2)<1e-12);
  assert(Math.abs(c.photosyntheticFAPAR(instant,{faparMethod:'NDVI_RED_EXP',fexp:1}).v-.5**1.7)<1e-12);
  values.NDVI=-.1;assert.equal(c.photosyntheticFAPAR(instant,{faparMethod:'NDVI_RED_EXP',fexp:.5}).v,0);values.NDVI=.5;
+ const mult={faparMethod:'FIPAR',FAPARmult:.5,fexp:1};
+ assert.equal(c.photosyntheticFAPAR(instant,mult).v,.2);
+ assert.equal(c.photosyntheticFAPAR(instant,{...mult,fitVIMinP05:true}).v,.4);
+ values.FIPAR=.2;assert.equal(c.photosyntheticFAPAR(instant,{...mult,useSharedFPAR:true}).v,.2);
  values.FIPAR=.16;assert(Math.abs(c.photosyntheticFAPAR(instant,{faparMethod:'FIPAR',useSharedFPAR:true,fexp:2}).v-.16)<1e-12);
  assert(s.includes('photosyntheticFAPAR(f, mergeParams(p,{useSharedFPAR:false}))'));
  assert(s.includes("p.faparMethod === 'FIPAR' && p.fexp === 1"));

@@ -27,6 +27,7 @@ var ACCLIM_PARAMS = {
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
   fMexp:       0.5,      // Seasonal FAPAR / running seasonal maximum exponent
+  FAPARmult: 1,          // Multiplier for the direct FIPAR option
   faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
@@ -1131,7 +1132,7 @@ function computeFIPAR(ndvi, p, ge) {
 // clamp01(x) = min(1, max(0, x)); n = max(0, NDVI).
 // GEprime = (GE - GEmin)/(GEmax - GEmin) when GEmin < 0, otherwise GEprime = GE.
 // GE bounds use valid paired observations at the selected run timestep/date range.
-// FIPAR: B = selected FIPAR (before the optional shared-FAPAR override).
+// FIPAR: B = selected FIPAR * FAPARmult (before the optional shared-FAPAR override).
 //   Scaled NDVI FIPAR = [max(0, NDVI - ndvi_min)/(ndvi_max - ndvi_min)]^ndvi_exp.
 //   Blended FIPAR = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
 // FIPAR_GE: B = selected FIPAR with ndvi_min = intercept of NDVI versus GEprime.
@@ -1178,7 +1179,10 @@ function photosyntheticFAPAR(instant, p) {
     }
     return fge.pow(p.fexp);
   }
-  if (p.faparMethod === 'FIPAR') return ee.Number(instant.get(p.useSharedFPAR?'FIPAR_NDVI':'FIPAR')).pow(p.fexp);
+  if (p.faparMethod === 'FIPAR') {
+    var originalFIPAR = instant.get(p.useSharedFPAR ? 'FIPAR_NDVI' : 'FIPAR');
+    return ee.Number(originalFIPAR).multiply(directFIPARMultiplier(p)).pow(p.fexp);
+  }
   var FAPAR_in = ee.Number(instant.get('EVI2'));
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
@@ -1198,6 +1202,11 @@ function ndviBlendWeight(ndvi, p) {
     throw new Error('blend_exp must be finite and nonnegative.');
   }
   return ee.Number(ndvi).max(0).pow(p.blend_exp);
+}
+
+function directFIPARMultiplier(p) {
+  if (p.fitNDVIminGE || p.fitVIMinP05 || p.FAPARmult === undefined) return 1;
+  return p.FAPARmult;
 }
 
 function greenExcessMultiplier(ge,p) {
@@ -1270,7 +1279,7 @@ function computeDiagnostics(running, instant, params) {
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
   var faparFiparValid = FIPAR.gt(1e-9);
-  var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
+  var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1 && directFIPARMultiplier(p) === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
   var zC3 = zCoef.multiply(
@@ -2291,6 +2300,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0});
       d.evi2_min_ge=eviFit?eviFit.intercept:null;d.ndvi_min_ge=ndviDiagnosticFit?ndviDiagnosticFit.intercept:null;
       d.NIRv=carbonFinite(d.nir)&&carbonFinite(d.NDVI)?d.nir*d.NDVI:null;
+      d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
       d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':'configured';
@@ -4058,7 +4068,7 @@ UI.runButton = ui.Button({
 });
 
 UI.faparSelector = ui.Select({items: [
-  {label: 'FAPAR = FIPAR', value: 'FIPAR'},
+  {label: 'FAPAR = FIPAR × FAPARmult', value: 'FIPAR'},
   {label: 'FAPAR = NDVI²', value: 'NDVI'},
   {label: 'FAPAR = NIRv (NIR × NDVI)', value: 'NIRV'},
   {label: 'FAPAR = NDVI^(R × 0.5 + (1 − R) × 2)', value: 'NDVI_RED_EXP'},
@@ -4079,6 +4089,7 @@ UI.vegetationParameters = {};
 [
   {key:'GE_scale', label:'GE_scale'},
   {key:'ndvi_exp', label:'ndvi_exp'},
+  {key:'FAPARmult', label:'FAPARmult (direct FIPAR option)'},
   {key:'fMexp', label:'fMexp (seasonal FAPAR multiplier; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
   {key:'EVI2max', label:'EVI2max'},
@@ -4100,6 +4111,7 @@ function readVegetationParameters() {
     values[key] = value;
   });
   if (values.GE_scale <= 0) throw new Error('GE_scale must be positive.');
+  if (values.FAPARmult < 0) throw new Error('FAPARmult must be nonnegative.');
   if (values.fMexp < 0) throw new Error('fMexp must be nonnegative.');
   if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
   if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
