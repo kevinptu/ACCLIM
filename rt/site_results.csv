@@ -1,0 +1,4 @@
+site,date,pixels,held_out_nir_rmse,constant_nir_rmse,cover_at_bound_pct
+Jornada,2024-06-08,261,0.04608,0.04258,49.8
+Tonzi,2024-06-07,439,0.03917,0.02327,4.6
+Norunda,2024-06-02,322,0.0501,0.04866,92.9
