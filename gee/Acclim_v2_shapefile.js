@@ -1898,9 +1898,12 @@ function bucketR2(rows, predicted, reference) {
   return xx > 0 && yy > 0 ? Math.max(0, Math.min(1, (xy / Math.sqrt(xx) / Math.sqrt(yy)) * (xy / Math.sqrt(xx) / Math.sqrt(yy)))) : null;
 }
 function soilChartFooter(info, field) {
-  var texture = carbonFinite(info.sand_0_30cm_pct) && carbonFinite(info.AWC_pct_vol) ?
-    info.sand_0_30cm_pct.toFixed(1) + '%; AWC: ' + info.AWC_pct_vol.toFixed(2) + '%vol' : 'unavailable';
-  return ui.Label({value: 'SoilGrids sand (0–30 cm): ' + texture + '\n' +
+  var texture = ['sand', 'silt', 'clay'].map(function(name) {
+    var pct = info[name + '_0_30cm_pct'];
+    return name + ' ' + (carbonFinite(pct) ? pct.toFixed(1) + '%' : 'unavailable');
+  }).join(', ');
+  return ui.Label({value: 'SoilGrids (0–30 cm): ' + texture + '\nAWC: ' +
+    (carbonFinite(info.AWC_pct_vol) ? info.AWC_pct_vol.toFixed(2) + '%vol' : 'unavailable') + '\n' +
     'r² (bucket vs ACCLIM): ' + (carbonFinite(info[field]) ? info[field].toFixed(2) : 'unavailable'),
     style: {fontSize: '11px', color: '#666', whiteSpace: 'pre-wrap'}});
 }
@@ -3005,18 +3008,33 @@ function carbonRowsToFC(rows) {
 // Thickness-weight the 0-5, 5-15 and 15-30 cm mean predictions (5:10:15).
 // Arithmetic intersects depth masks, so incomplete profiles are not filled.
 // https://docs.isric.org/globaldata/soilgrids/access_on_gee.html
-function fetchSoilGridsSand(geom) {
-  var sand = ee.Image('projects/soilgrids-isric/sand_mean')
-    .select(['sand_0-5cm_mean', 'sand_5-15cm_mean', 'sand_15-30cm_mean']);
-  sand = sand.updateMask(sand.gte(0).and(sand.lte(1000)));
-  var sand030 = sand.select('sand_0-5cm_mean').multiply(5)
-    .add(sand.select('sand_5-15cm_mean').multiply(10))
-    .add(sand.select('sand_15-30cm_mean').multiply(15))
-    .divide(30).divide(10).rename('sand_0_30cm_pct');
-  // Point: local pixel. Polygon: spatial mean of the depth-weighted pixels.
-  return sand030.reduceRegion({reducer: ee.Reducer.mean(), geometry: geom,
-    crs: sand.select('sand_0-5cm_mean').projection(), scale: 250,
-    maxPixels: 1e10, tileScale: 4});
+function fetchSoilGridsTexture(geom) {
+  function depthMean(name) {
+    var layers = ee.Image('projects/soilgrids-isric/' + name + '_mean');
+    var valid = layers.updateMask(layers.gte(0).and(layers.lte(1000)));
+    // SoilGrids g/kg to mass %, weighted by layer thickness over 0–30 cm.
+    return valid.select(name + '_0-5cm_mean').multiply(5)
+      .add(valid.select(name + '_5-15cm_mean').multiply(10))
+      .add(valid.select(name + '_15-30cm_mean').multiply(15))
+      .divide(300).rename(name + '_0_30cm_pct');
+  }
+  var sand = depthMean('sand');
+  return sand.addBands(depthMean('silt')).addBands(depthMean('clay')).reduceRegion({
+    reducer: ee.Reducer.mean(), geometry: geom, crs: sand.projection(),
+    scale: 250, maxPixels: 1e10, tileScale: 4});
+}
+
+// Approximate endmembers read from "Soil spectra in VNIR region":
+// https://lcluc.umd.edu/sites/default/files/lcluc_documents/Chirag.pdf
+// Sand/silt/clay at 640 nm: 0.26/0.32/0.26; at 850 nm: 0.37/0.42/0.33.
+function soilSpectralEstimate(texture) {
+  var sand = texture.sand_0_30cm_pct, silt = texture.silt_0_30cm_pct, clay = texture.clay_0_30cm_pct;
+  var valid = [sand, silt, clay].every(function(x) { return carbonFinite(x) && x >= 0 && x <= 100; });
+  var total = sand + silt + clay;
+  if (!valid || total <= 0) return null;
+  var red = (0.26 * sand + 0.32 * silt + 0.26 * clay) / total;
+  var nir = (0.37 * sand + 0.42 * silt + 0.33 * clay) / total;
+  return {red: red, nir: nir, ndvi: (nir - red) / (nir + red)};
 }
 
 // User-supplied Relative AWC versus sand (% by mass) plot.
@@ -3272,12 +3290,12 @@ function loadCarbonProducts(output, geom, start, end, requestId, regionName, c4C
   function ready(texture, error) {
     if (requestId !== UI._requestId) return;
     loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName,
-      error || !texture ? null : texture.sand_0_30cm_pct, c4Chart);
+      error || !texture ? {} : texture, c4Chart);
   }
   // Texture failure leaves depths missing but does not suppress other outputs.
-  try { fetchSoilGridsSand(geom).evaluate(ready); } catch (error) { ready(null, error); }
+  try { fetchSoilGridsTexture(geom).evaluate(ready); } catch (error) { ready(null, error); }
 }
-function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, sandPercent, c4Chart) {
+function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, texture, c4Chart) {
   var context = fetchCarbonAnnualContext(geom, start, end, {weatherPlan:UI._runWeatherPlan,weatherSource:UI._lastRun.weatherSource,satelliteSource:UI._lastRun.satelliteSource});
   var monthlyProperties = output.toList(output.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); });
   var annualProperties = context.toList(context.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); });
@@ -3295,7 +3313,9 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       result.monthly.forEach(function(row) {
         row.SM_r2 = carbonFinite(row.SMmax) ? soilR2 : null;
         row.SM_et_r2 = carbonFinite(row.SMmax_et) ? etR2 : null;
-        var depths = effectiveDepthFields(row, sandPercent);
+        var depths = effectiveDepthFields(row, texture.sand_0_30cm_pct);
+        row.silt_0_30cm_pct = carbonFinite(texture.silt_0_30cm_pct) ? texture.silt_0_30cm_pct : null;
+        row.clay_0_30cm_pct = carbonFinite(texture.clay_0_30cm_pct) ? texture.clay_0_30cm_pct : null;
         Object.keys(depths).forEach(function(key) { row[key] = depths[key]; });
         var tDepth = transpirationSourceDepth([row]);
         Object.keys(tDepth).forEach(function(key) { row[key] = tDepth[key]; });
@@ -3361,6 +3381,10 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
         addSoilMoistureChart(output, geom, requestId, regionName, bucketInfo);
       }
       c4Chart(result.monthly,null);
+      var soil = soilSpectralEstimate(texture);
+      addChartNote(ui.Label('Texture-based bare-soil estimate (0–30 cm): ' + (soil ?
+        'R (640 nm) = ' + soil.red.toFixed(3) + ', NIR (850 nm) = ' + soil.nir.toFixed(3) +
+        ', NDVImin = ' + soil.ndvi.toFixed(3) : 'unavailable')));
       if (bucketInfo.FAPAR_method_requested === 'EVI2') {
         addChartNote(ui.Label(bucketInfo.FAPAR_method === 'EVI2'
           ? 'FAPAR = EVI2 scaled between EVI2min=' + bucketInfo.FAPAR_EVI2min.toFixed(3) +
