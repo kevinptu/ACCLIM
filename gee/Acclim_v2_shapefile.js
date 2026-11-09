@@ -1278,13 +1278,17 @@ function computeDiagnostics(running, instant, params) {
   // VPD * 1000 / Pmean is Pa/Pa, so zC3 is umol/mol (ppm).
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
+  // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
+  var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
+  var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
   var faparFiparValid = FIPAR.gt(1e-9);
   var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1 && directFIPARMultiplier(p) === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
   var zC3 = zCoef.multiply(
     s_mean.add(p.gamma_psy).multiply(VPDday_mean).multiply(PARday_mean).multiply(1000)
-  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean)).multiply(faparFiparRatio);
+  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean)).multiply(faparFiparRatio)
+    .multiply(fD).multiply(fM);
 
   // Quadratic solves ciC3 in ppm, using Gamma* converted from Pa to ppm.
   // a=1, b=2*gamma_ppm+zC3-ca_mean, c=-gamma_ppm*(zC3+2*ca_mean).
@@ -1309,10 +1313,7 @@ function computeDiagnostics(running, instant, params) {
     .divide(piC3_mean.add(gamma_star_mean.multiply(2)));
   var QYC4_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC4));
 
-  // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean
-  // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
-  var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
-  var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
+  // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean * fD * fM
   var FAPARmax=ee.Number(ee.Algorithms.If(instant.contains('FAPARmax'),instant.get('FAPARmax'),FAPAR));
   var fge=greenExcessMultiplier(instant.get('GE',0),p);
   var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
