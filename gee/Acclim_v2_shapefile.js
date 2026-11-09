@@ -39,6 +39,8 @@ var ACCLIM_PARAMS = {
   fANPP_slope:    0.0129,
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
+  fDexp_T: 0,             // Canopy transpiration exponent on the existing fD factor
+  fMexp_T: 0,             // Canopy transpiration exponent on the existing fM factor
   fDexp:          0,      // VPD attenuation exponent (VPDday_mean in kPa)
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
@@ -1281,6 +1283,15 @@ function computeDiagnostics(running, instant, params) {
   // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
   var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
   var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
+  // T = Tbase * fD^fDexp_T * fM^fMexp_T. Zero exponents disable each factor.
+  var dTrans = p.fDexp_T === 0 ? ee.Number(1) : fD.pow(p.fDexp_T);
+  var mTrans = p.fMexp_T === 0 ? ee.Number(1) : fM.pow(p.fMexp_T);
+  var transpirationFactor = dTrans.multiply(mTrans);
+  // The C3 WUE equation uses the ratio of the carbon and transpiration factors.
+  // At zero transpiration the ratio is unidentified; use a finite internal value.
+  var validTransRatio = transpirationFactor.gt(0);
+  var carbonWaterFactor = ee.Number(ee.Algorithms.If(validTransRatio,
+    fD.multiply(fM).divide(ee.Number(ee.Algorithms.If(validTransRatio, transpirationFactor, 1))), 1));
   var faparFiparValid = FIPAR.gt(1e-9);
   var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1 && directFIPARMultiplier(p) === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
@@ -1288,7 +1299,7 @@ function computeDiagnostics(running, instant, params) {
   var zC3 = zCoef.multiply(
     s_mean.add(p.gamma_psy).multiply(VPDday_mean).multiply(PARday_mean).multiply(1000)
   ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean)).multiply(faparFiparRatio)
-    .multiply(fD).multiply(fM);
+    .multiply(carbonWaterFactor);
 
   // Quadratic solves ciC3 in ppm, using Gamma* converted from Pa to ppm.
   // a=1, b=2*gamma_ppm+zC3-ca_mean, c=-gamma_ppm*(zC3+2*ca_mean).
@@ -1384,7 +1395,7 @@ function computeDiagnostics(running, instant, params) {
   var PT_mean = ee.Number(p.PT_coef).multiply(s_ratio_mean).multiply(Rnday_mean);
 
   var PredLEcday_mean = PT_mean.multiply(FIPAR).multiply(fcold_mean)
-    .multiply(ee.Number(1).subtract(fwet_mean));
+    .multiply(ee.Number(1).subtract(fwet_mean)).multiply(transpirationFactor);
   var PredLEiday_mean = fwet_mean.multiply(PT_mean).multiply(FIPAR);
   var PredLEsday_mean = fwet_mean.add(ee.Number(1).subtract(fwet_mean).multiply(fSM_mean))
     .multiply(PT_mean).multiply(ee.Number(1).subtract(FIPAR));
@@ -1396,6 +1407,8 @@ function computeDiagnostics(running, instant, params) {
     gamma_star_mean:  gamma_star_mean,
     s_mean:           s_mean,
     zC3:              zC3,
+    T_multiplier: transpirationFactor, fDexp_T: p.fDexp_T, fMexp_T: p.fMexp_T,
+    ci_T_multiplier_valid: validTransRatio,
     FAPAR_FIPAR_ratio: faparFiparRatio,
     FAPAR_FIPAR_valid: faparFiparValid,
     bC3:              bC3,
@@ -4091,6 +4104,9 @@ UI.vegetationParameters = {};
   {key:'GE_scale', label:'GE_scale'},
   {key:'ndvi_exp', label:'ndvi_exp'},
   {key:'FAPARmult', label:'FAPARmult (direct FIPAR option)'},
+  {key:'fDexp', label:'fDexp (VPD exponent defining fD)'},
+  {key:'fDexp_T', label:'fDexp_T (transpiration: 0 off, 1 full fD)'},
+  {key:'fMexp_T', label:'fMexp_T (transpiration: 0 off, 1 full fM)'},
   {key:'fMexp', label:'fMexp (seasonal FAPAR multiplier; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
   {key:'EVI2max', label:'EVI2max'},
@@ -4113,6 +4129,8 @@ function readVegetationParameters() {
   });
   if (values.GE_scale <= 0) throw new Error('GE_scale must be positive.');
   if (values.FAPARmult < 0) throw new Error('FAPARmult must be nonnegative.');
+  if (values.fDexp < 0) throw new Error('fDexp must be nonnegative.');
+  if (values.fDexp_T < 0 || values.fMexp_T < 0) throw new Error('Transpiration exponents must be nonnegative.');
   if (values.fMexp < 0) throw new Error('fMexp must be nonnegative.');
   if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
   if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
