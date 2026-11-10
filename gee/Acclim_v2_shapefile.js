@@ -4799,14 +4799,14 @@ function onRun() {
       conductanceChart.setOptions(conductanceOptions);
       chartCache.ready.forEach(function(ready) { ready(); });
       chartCache.ready = [];
-      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge', 'NIRv'],
-        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge', 'NIRv'],
-        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60', '#43A047'], [2, 3, 4, 5, 6, 7, 8], {
-          series: {0: {color: '#000000', lineDashStyle: [6, 4]},
-            1: {color: '#1976D2', lineDashStyle: [6, 4]},
-            2: {color: '#2E7D32'}, 3: {color: '#8E24AA'},
-            4: {color: '#EF6C00', targetAxisIndex: 1}},
-          title: regionChartTitle('FAPAR & C4 Fraction', regionName), chartArea: {top: 80},
+      addOptionalSeriesChart(chartCache, ['FIPAR', 'FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge', 'NIRv'],
+        ['FIPAR', 'FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge', 'NIRv'],
+        ['#D55E00', '#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60', '#43A047'], [3, 4, 5, 6, 7, 8, 9], {
+          series: {0: {color: '#D55E00'}, 1: {color: '#000000', lineDashStyle: [6, 4]},
+            2: {color: '#1976D2', lineDashStyle: [6, 4]},
+            3: {color: '#2E7D32'}, 4: {color: '#8E24AA'},
+            5: {color: '#EF6C00', targetAxisIndex: 1}},
+          title: regionChartTitle('FAPAR, FIPAR & C4 Fraction', regionName), chartArea: {top: 80},
           hAxis: {title: 'Date'},
           vAxes: {0: {title: 'Fraction / vegetation index'},
             1: {title: 'Green LAI (m² leaf/m² ground)', viewWindow: {min: 0},
