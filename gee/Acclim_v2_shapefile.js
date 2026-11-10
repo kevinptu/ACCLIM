@@ -26,9 +26,9 @@ var ACCLIM_PARAMS = {
   fge_exp: 1,             // Raw GE / GE_scale exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
-  fMexp:       0.5,      // Seasonal FAPAR / running seasonal maximum exponent
+  fMexp:       1,      // Seasonal FAPAR / running seasonal maximum exponent
   FAPARmult: 1,          // Multiplier for the direct FIPAR option
-  faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
+  faparMethod: 'EVI2',     // Fixed bounds by default; the app resolves bare-soil minima per location
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
   fitEVI2: false,         // Fit EVI2 bounds against FIPAR; otherwise use fixed bounds
@@ -40,14 +40,14 @@ var ACCLIM_PARAMS = {
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
   fDexp_T: 0,             // Canopy transpiration exponent on the existing fD factor
-  fMexp_T: 0,             // Canopy transpiration exponent on the existing fM factor
+  fMexp_T: 1,             // Canopy transpiration exponent on the existing fM factor
   fDexp:          0,      // VPD attenuation exponent (VPDday_mean in kPa)
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
   EVI2min:        0.0,     // EVI2 of bare ground
-  EVI2max:        0.83,     // EVI2 of full green canopy
+  EVI2max:        0.5,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
   rho_air:        1.292,    // air density (kg/m3)
@@ -74,7 +74,7 @@ var ACCLIM_PARAMS = {
   // Intercepted PAR fraction used for water and energy partitioning.
   ndvi_min: 0, // Used unless the GE′=0 NDVImin option is selected.
   ndvi_max: 1,
-  ndvi_exp: 1.6
+  ndvi_exp: 1
 };
 
 var DATASETS = {
@@ -2306,7 +2306,9 @@ function fetchHistoricalVIMinima(geom,start,key,params,request,done) {
 
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
-  params=mergeParams(ACCLIM_PARAMS,params||{});
+  var overrides = params || {};
+  var autoNDVI = overrides.ndvi_min == null, autoEVI2 = overrides.EVI2min == null;
+  params=mergeParams(ACCLIM_PARAMS,overrides);
   if(params.faparMethod==='NDVI_GE_OFFSET')params.fitNDVIminGE=true;
   var gePeriods=[],ndviFit,historicalFit;
   function complete(rows){
@@ -2320,7 +2322,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
-      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':'configured';
+      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':autoNDVI?'SoilGrids texture':'configured';
       if(historicalFit){d.ndvi_min_p05=historicalFit.ndvi;d.evi2_min_p05=historicalFit.evi2;d.vi_baseline_n=historicalFit.n;d.vi_baseline_start=historicalFit.start;d.vi_baseline_end=historicalFit.end;d.vi_baseline_first_observation=historicalFit.first;d.vi_baseline_last_observation=historicalFit.last;}
       if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
         d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;}
@@ -2418,9 +2420,30 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
           cfg.modelParams=params;startInputs();
         });return;
       }
-      cfg.modelParams=params;
-      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+(params.fitNDVIminGE?' from GE′=0':' (configured)')+'; preparing model inputs...');
-      startInputs();
+      function prepareInputs() {
+        if (params.ndvi_max <= params.ndvi_min || params.EVI2max <= params.EVI2min) {
+          done(null,'Each VI maximum must exceed its resolved minimum. Check vegetation parameters.');
+          return;
+        }
+        cfg.modelParams=params;
+        setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+', EVI2min = '+params.EVI2min.toFixed(4)+'; preparing model inputs...');
+        startInputs();
+      }
+      if ((autoNDVI && !params.fitNDVIminGE) || autoEVI2) {
+        fetchSoilGridsTexture(geom).evaluate(function(texture, error) {
+          if (request !== UI._requestId) return;
+          var soil = !error && texture && soilSpectralEstimate(texture);
+          if (!soil) {
+            done(null,'SoilGrids texture unavailable for this location. Enter numerical VI minima to run.');
+            return;
+          }
+          if (autoNDVI && !params.fitNDVIminGE) params.ndvi_min = soil.ndvi;
+          if (autoEVI2) params.EVI2min = soil.evi2;
+          try { prepareInputs(); } catch (err) { done(null,err.message); }
+        });
+      } else {
+        prepareInputs();
+      }
     }catch(error){done(null,error.message);}
   });
 }
@@ -4119,7 +4142,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'FIPAR',
+  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'EVI2_FIXED',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
@@ -4139,7 +4162,9 @@ UI.vegetationParameters = {};
   {key:'ndvi_max', label:'NDVImax'}
 ].forEach(function(parameter) {
   UI.inputPanel.add(ui.Label(parameter.label));
-  var input = ui.Textbox({value:String(ACCLIM_PARAMS[parameter.key]), style:{stretch:'horizontal'}});
+  var textureDefault = parameter.key === 'EVI2min' || parameter.key === 'ndvi_min';
+  var input = ui.Textbox({value:textureDefault ? '' : String(ACCLIM_PARAMS[parameter.key]),
+    placeholder:textureDefault ? 'Auto: SoilGrids texture (or enter a value)' : '', style:{stretch:'horizontal'}});
   UI.vegetationParameters[parameter.key] = input;
   UI.inputPanel.add(input);
 });
@@ -4148,6 +4173,7 @@ function readVegetationParameters() {
   var values = {};
   Object.keys(UI.vegetationParameters).forEach(function(key) {
     var text = UI.vegetationParameters[key].getValue().trim();
+    if (!text && (key === 'ndvi_min' || key === 'EVI2min')) return;
     var value = Number(text);
     if (!text || !isFinite(value)) throw new Error(key + ' must be a finite number.');
     values[key] = value;
