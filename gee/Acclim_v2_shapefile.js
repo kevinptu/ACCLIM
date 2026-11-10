@@ -47,6 +47,7 @@ var ACCLIM_PARAMS = {
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
   EVI2min:        0,     // EVI2 of bare ground
+  powerFixedEVI2: true,    // Scaled EVI2 uses EVI2exp for both interactive and batch runs
   EVI2exp: 1.2,            // Exponent for the powered fixed-bounds EVI2 option
   EVI2max:        0.6,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
@@ -1146,7 +1147,6 @@ function computeFIPAR(ndvi, p, ge) {
 // NDVI_BLEND: B = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
 // GE_NDVI_MIN: B = min(fge, n^ndvi_exp), using the same fge scaling as FGE.
 // EVI2_FIXED_POWER: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min))^EVI2exp.
-// EVI2_FIXED: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min)).
 // EVI2_FITTED: fit FIPAR = a + b*EVI2; lo = -a/b; hi = (1-a)/b.
 //   B = clamp01((EVI2 - lo)/(hi - lo)).
 // EVI2_FITTED_MIN: same fitted lo, hi = 0.6; B = clamp01((EVI2-lo)/(0.6-lo)).
@@ -4191,8 +4191,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'},
-  {label: 'FAPAR = (EVI2 scaled to fixed bounds)^EVI2exp', value: 'EVI2_FIXED_POWER'}], value: 'EVI2_FIXED',
+  {label: 'FAPAR = scaled EVI2 (fixed bounds, EVI2exp)', value: 'EVI2_FIXED_POWER'}], value: 'EVI2_FIXED_POWER',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
@@ -4210,7 +4209,7 @@ UI.soilMinimumSelectors = {};
   {key:'fMtrans_exp', label:'fMtrans_exp (transpiration seasonal FAPAR response; 0 disables)'},
   {key:'fMgpp_exp', label:'fMgpp_exp (GPP seasonal FAPAR response; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
-  {key:'EVI2exp', label:'EVI2exp (powered fixed-bounds option)'},
+  {key:'EVI2exp', label:'EVI2exp (scaled EVI2)'},
   {key:'EVI2max', label:'EVI2max'},
   {key:'ndvi_min', label:'NDVImin'},
   {key:'ndvi_max', label:'NDVImax'}
