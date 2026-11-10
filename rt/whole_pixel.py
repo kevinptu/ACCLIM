@@ -69,7 +69,24 @@ def main():
     lais = np.arange(81)/10
     lai, rmse, pred = profiles(pixels,soils,lais)
     cover = -np.expm1(-.5*lai)
-    save(args.out/'soils.csv','red nir template joint_rmse',np.column_stack((soils,family,rmse)))
+    median_cover = np.median(cover, axis=0)
+    save(args.out/'soils.csv','red nir template joint_rmse median_cover',
+         np.column_stack((soils, family, rmse, median_cover)))
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for mask, label, color in [(~family, 'Broad grid only', '#728eae'),
+                               (family, 'Template subset', '#c96a22')]:
+        ax.scatter(100 * median_cover[mask], rmse[mask], s=10, alpha=.55,
+                   color=color, label=label)
+    best = np.argmin(rmse)
+    ax.scatter(100 * median_cover[best], rmse[best], marker='*', s=140,
+               color='black', label='Best shared background', zorder=3)
+    ax.set(xlabel='Median fitted foliage cover across pixels (%)',
+           ylabel='Joint red and NIR RMSE (BRF)',
+           title=f'{args.csv.stem} | {day} | {len(pixels)} pixels')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(args.out/'rmse_vs_fcover.png', dpi=180)
+    plt.close(fig)
     fig, axes = plt.subplots(1,2,figsize=(10,4),sharey=True)
     results = []
     for ax,(name,domain) in zip(axes,[('broad',np.ones(len(soils),bool)),('template',family)]):
