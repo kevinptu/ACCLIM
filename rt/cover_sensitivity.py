@@ -51,9 +51,9 @@ def main():
             templates.append([spectrum[220:271].mean(), spectrum[441:477].mean()])
     # Grid cells within one grid spacing of the PROSAIL wet/dry soil family.
     family = np.min(np.linalg.norm(soils[:, None] - templates, axis=2), axis=1) <= .01
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
     summary = []
-    for ax, lai in zip(axes, [3, 5, 7]):
+    for ax, lai in zip(axes, [1, 3, 5, 7]):
         cover, rmse, patches, dense_rmse = fit_soils(pixels, lai, soils)
         save(args.out/f"soils_LAI{lai}.csv", "soil_red soil_nir patch_red patch_nir joint_rmse in_template_family",
              np.column_stack((soils, patches, rmse, family)))
