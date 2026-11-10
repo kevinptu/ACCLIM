@@ -5,6 +5,13 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  vm.runInContext(s.slice(s.indexOf('function photosyntheticFAPAR('),s.indexOf('function greenExcessMultiplier(')),c);
  const values={red:.2,nir:.4,NDVI:.5,EVI2:.3,FIPAR:.4,FIPAR_NDVI:.4},instant={get:k=>values[k]};
  const modes=[{faparMethod:'NIRV'},{faparMethod:'NDVI_RED_EXP'},{faparMethod:'FIPAR'}, {faparMethod:'NDVI'}, {faparMethod:'EVI2',EVI2min:.1,EVI2max:.6}, {faparMethod:'EVI2',fitEVI2:true,faparFit:{valid:true,min:new N(.1),max:new N(.6)}}, {faparMethod:'EVI2',fitEVI2:true,faparFit:{valid:false,min:new N(.1),max:new N(.6)}}];
+ const powered={faparMethod:'EVI2',powerFixedEVI2:true,EVI2exp:1.2,EVI2min:.1,EVI2max:.5,fexp:1};
+ for(const [evi,scaled] of [[0,0],[.3,.5],[.8,1]]){
+   values.EVI2=evi;
+   assert(Math.abs(c.photosyntheticFAPAR(instant,powered).v-scaled**1.2)<1e-12);
+   assert(Math.abs(c.photosyntheticFAPAR(instant,{...powered,powerFixedEVI2:false}).v-scaled)<1e-12);
+ }
+ values.EVI2=.3;
  for(const p of modes){const base=c.photosyntheticFAPAR(instant,{...p,fexp:1}).v;for(const fexp of [.5,1,2])assert(Math.abs(c.photosyntheticFAPAR(instant,{...p,fexp}).v-base**fexp)<1e-12);}
  assert(Math.abs(c.photosyntheticFAPAR(instant,{faparMethod:'NIRV',fexp:1}).v-.2)<1e-12);
  assert(Math.abs(c.photosyntheticFAPAR(instant,{faparMethod:'NDVI_RED_EXP',fexp:1}).v-.5**1.7)<1e-12);

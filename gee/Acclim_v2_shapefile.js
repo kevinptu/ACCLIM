@@ -47,6 +47,7 @@ var ACCLIM_PARAMS = {
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
   EVI2min:        0,     // EVI2 of bare ground
+  EVI2exp: 1.2,            // Exponent for the powered fixed-bounds EVI2 option
   EVI2max:        0.6,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
@@ -1144,6 +1145,7 @@ function computeFIPAR(ndvi, p, ge) {
 // FGE: B = fge = clamp01(GE / GE_scale)^fge_exp; see greenExcessMultiplier for GE_scale.
 // NDVI_BLEND: B = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
 // GE_NDVI_MIN: B = min(fge, n^ndvi_exp), using the same fge scaling as FGE.
+// EVI2_FIXED_POWER: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min))^EVI2exp.
 // EVI2_FIXED: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min)).
 // EVI2_FITTED: fit FIPAR = a + b*EVI2; lo = -a/b; hi = (1-a)/b.
 //   B = clamp01((EVI2 - lo)/(hi - lo)).
@@ -1189,6 +1191,7 @@ function photosyntheticFAPAR(instant, p) {
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
     FAPAR = FAPAR_in.subtract(p.EVI2min).divide(p.EVI2max - p.EVI2min).max(0).min(1);
+    if (p.powerFixedEVI2) FAPAR = FAPAR.pow(p.EVI2exp);
   } else if (p.faparMethod === 'EVI2') {
     var fitRange = ee.Number(ee.Algorithms.If(p.faparFit.valid, p.faparFit.max.subtract(p.faparFit.min), 1));
     var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
@@ -2111,7 +2114,8 @@ function finishACCLIM(baseline, params) {
     f = f.set('FAPAR_method_requested', p.faparMethod);
     if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
       f = f.set({FAPAR_method: 'EVI2', FAPAR_fit_status: 'fixed bounds',
-        FAPAR_EVI2min: p.EVI2min, FAPAR_EVI2max: p.EVI2max});
+        FAPAR_EVI2min: p.EVI2min, FAPAR_EVI2max: p.EVI2max,
+        FAPAR_EVI2exp_used: p.powerFixedEVI2 ? p.EVI2exp : 1});
     } else if (p.faparMethod === 'EVI2') {
       f = f.set({FAPAR_method: ee.Algorithms.If(p.faparFit.valid, 'EVI2', 'NDVI'),
         FAPAR_fit_status: ee.Algorithms.If(p.faparFit.valid, p.fitEVI2maxFixed ? 'fitted minimum; fixed maximum 0.6' : 'fitted', 'NDVI fallback: invalid fit or endpoint range'),
@@ -4187,7 +4191,8 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'EVI2_FIXED',
+  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'},
+  {label: 'FAPAR = (EVI2 scaled to fixed bounds)^EVI2exp', value: 'EVI2_FIXED_POWER'}], value: 'EVI2_FIXED',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
@@ -4205,6 +4210,7 @@ UI.soilMinimumSelectors = {};
   {key:'fMtrans_exp', label:'fMtrans_exp (transpiration seasonal FAPAR response; 0 disables)'},
   {key:'fMgpp_exp', label:'fMgpp_exp (GPP seasonal FAPAR response; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
+  {key:'EVI2exp', label:'EVI2exp (powered fixed-bounds option)'},
   {key:'EVI2max', label:'EVI2max'},
   {key:'ndvi_min', label:'NDVImin'},
   {key:'ndvi_max', label:'NDVImax'}
@@ -4238,6 +4244,7 @@ function readVegetationParameters() {
   ['fDgpp_exp','fDtrans_exp','fMgpp_exp','fMtrans_exp'].forEach(function(key) {
     if (values[key] < 0) throw new Error(key + ' must be nonnegative.');
   });
+  if (values.EVI2exp < 0) throw new Error('EVI2exp must be nonnegative.');
   if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
   if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
   if (values.EVI2max <= values.EVI2min) throw new Error('EVI2max must exceed EVI2min.');
@@ -4842,7 +4849,7 @@ function onRun() {
       }
       try {
     var runDataConfig={refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
