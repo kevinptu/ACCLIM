@@ -26,9 +26,9 @@ var ACCLIM_PARAMS = {
   fge_exp: 1,             // Raw GE / GE_scale exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
-  fMexp:       0.5,      // Seasonal FAPAR / running seasonal maximum exponent
+  fMgpp_exp: 1,  // GPP seasonal FAPAR response
   FAPARmult: 1,          // Multiplier for the direct FIPAR option
-  faparMethod: 'FIPAR',    // Direct FIPAR by default; scaled EVI2 remains selectable
+  faparMethod: 'EVI2',     // Fixed bounds by default; optional SoilGrids minima resolve per location
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
   fitEVI2: false,         // Fit EVI2 bounds against FIPAR; otherwise use fixed bounds
@@ -39,13 +39,17 @@ var ACCLIM_PARAMS = {
   fANPP_slope:    0.0129,
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
-  fDexp:          0,      // VPD attenuation exponent (VPDday_mean in kPa)
+  fDtrans_exp: 0,  // transpiration VPD response
+  fMtrans_exp: 0,  // transpiration seasonal FAPAR response
+  fDgpp_exp: 0,  // GPP VPD response
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
-  EVI2min:        0.0,     // EVI2 of bare ground
-  EVI2max:        0.83,     // EVI2 of full green canopy
+  EVI2min:        0,     // EVI2 of bare ground
+  powerFixedEVI2: true,    // Scaled EVI2 uses EVI2exp for both interactive and batch runs
+  EVI2exp: 1.2,            // Exponent for the powered fixed-bounds EVI2 option
+  EVI2max:        0.6,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
   rho_air:        1.292,    // air density (kg/m3)
@@ -1142,7 +1146,7 @@ function computeFIPAR(ndvi, p, ge) {
 // FGE: B = fge = clamp01(GE / GE_scale)^fge_exp; see greenExcessMultiplier for GE_scale.
 // NDVI_BLEND: B = w*n^ndvi_exp + (1-w)*fge; w = n^blend_exp.
 // GE_NDVI_MIN: B = min(fge, n^ndvi_exp), using the same fge scaling as FGE.
-// EVI2_FIXED: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min)).
+// EVI2_FIXED_POWER: B = clamp01((EVI2 - EVI2min)/(EVI2max - EVI2min))^EVI2exp.
 // EVI2_FITTED: fit FIPAR = a + b*EVI2; lo = -a/b; hi = (1-a)/b.
 //   B = clamp01((EVI2 - lo)/(hi - lo)).
 // EVI2_FITTED_MIN: same fitted lo, hi = 0.6; B = clamp01((EVI2-lo)/(0.6-lo)).
@@ -1187,6 +1191,7 @@ function photosyntheticFAPAR(instant, p) {
   var FAPAR = ee.Number(instant.get('NDVI')).pow(2);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
     FAPAR = FAPAR_in.subtract(p.EVI2min).divide(p.EVI2max - p.EVI2min).max(0).min(1);
+    if (p.powerFixedEVI2) FAPAR = FAPAR.pow(p.EVI2exp);
   } else if (p.faparMethod === 'EVI2') {
     var fitRange = ee.Number(ee.Algorithms.If(p.faparFit.valid, p.faparFit.max.subtract(p.faparFit.min), 1));
     var scaledEVI2 = FAPAR_in.subtract(p.faparFit.min)
@@ -1278,17 +1283,28 @@ function computeDiagnostics(running, instant, params) {
   // VPD * 1000 / Pmean is Pa/Pa, so zC3 is umol/mol (ppm).
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
-  // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
-  var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
-  var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
+  // Each exponent acts directly on a raw environmental response, once per flux.
+  var vpdResponse = ee.Number(1).divide(VPDday_mean.max(1)); // VPD in kPa
+  var seasonalRatio = ee.Number(instant.get('seasonal_ratio', 1)); // FAPAR / running maximum
+  var fDgpp = p.fDgpp_exp === 0 ? ee.Number(1) : vpdResponse.pow(p.fDgpp_exp);
+  var fDtrans = p.fDtrans_exp === 0 ? ee.Number(1) : vpdResponse.pow(p.fDtrans_exp);
+  var fMgpp = p.fMgpp_exp === 0 ? ee.Number(1) : seasonalRatio.pow(p.fMgpp_exp);
+  var fMtrans = p.fMtrans_exp === 0 ? ee.Number(1) : seasonalRatio.pow(p.fMtrans_exp);
+  var gppFactor = fDgpp.multiply(fMgpp);
+  var transpirationFactor = fDtrans.multiply(fMtrans);
+  var validTransRatio = transpirationFactor.gt(0);
+  // At zero T multiplier, A/T is unidentified. Retain the flagged internal fallback.
+  var carbonWaterFactor = ee.Number(ee.Algorithms.If(validTransRatio,
+    gppFactor.divide(ee.Number(ee.Algorithms.If(validTransRatio, transpirationFactor, 1))), 1));
   var faparFiparValid = FIPAR.gt(1e-9);
   var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1 && directFIPARMultiplier(p) === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
-  var zC3 = zCoef.multiply(
+  var zMet = zCoef.multiply(
     s_mean.add(p.gamma_psy).multiply(VPDday_mean).multiply(PARday_mean).multiply(1000)
-  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean)).multiply(faparFiparRatio)
-    .multiply(fD).multiply(fM);
+  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean));
+  // zC3 = meteorological term * FAPAR/FIPAR * GPP factors / transpiration factors.
+  var zC3 = zMet.multiply(faparFiparRatio).multiply(carbonWaterFactor);
 
   // Quadratic solves ciC3 in ppm, using Gamma* converted from Pa to ppm.
   // a=1, b=2*gamma_ppm+zC3-ca_mean, c=-gamma_ppm*(zC3+2*ca_mean).
@@ -1313,11 +1329,11 @@ function computeDiagnostics(running, instant, params) {
     .divide(piC3_mean.add(gamma_star_mean.multiply(2)));
   var QYC4_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC4));
 
-  // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean * fD * fM
+  // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean * fDgpp * fMgpp
   var FAPARmax=ee.Number(ee.Algorithms.If(instant.contains('FAPARmax'),instant.get('FAPARmax'),FAPAR));
   var fge=greenExcessMultiplier(instant.get('GE',0),p);
-  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
-  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
+  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(gppFactor);
+  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(gppFactor);
 
   // Mean daytime GPP
   var GPPday_mean_C3 = GPPmax_C3.multiply(p.GPPmean2GPPmax);
@@ -1384,7 +1400,7 @@ function computeDiagnostics(running, instant, params) {
   var PT_mean = ee.Number(p.PT_coef).multiply(s_ratio_mean).multiply(Rnday_mean);
 
   var PredLEcday_mean = PT_mean.multiply(FIPAR).multiply(fcold_mean)
-    .multiply(ee.Number(1).subtract(fwet_mean));
+    .multiply(ee.Number(1).subtract(fwet_mean)).multiply(transpirationFactor);
   var PredLEiday_mean = fwet_mean.multiply(PT_mean).multiply(FIPAR);
   var PredLEsday_mean = fwet_mean.add(ee.Number(1).subtract(fwet_mean).multiply(fSM_mean))
     .multiply(PT_mean).multiply(ee.Number(1).subtract(FIPAR));
@@ -1396,6 +1412,12 @@ function computeDiagnostics(running, instant, params) {
     gamma_star_mean:  gamma_star_mean,
     s_mean:           s_mean,
     zC3:              zC3,
+    T_multiplier: transpirationFactor, GPP_multiplier: gppFactor,
+    zMet: zMet, carbon_water_factor: carbonWaterFactor, seasonal_ratio: seasonalRatio,
+    fDgpp: fDgpp, fDtrans: fDtrans, fMgpp: fMgpp, fMtrans: fMtrans,
+    fDgpp_exp: p.fDgpp_exp, fDtrans_exp: p.fDtrans_exp,
+    fMgpp_exp: p.fMgpp_exp, fMtrans_exp: p.fMtrans_exp,
+    ci_T_multiplier_valid: validTransRatio,
     FAPAR_FIPAR_ratio: faparFiparRatio,
     FAPAR_FIPAR_valid: faparFiparValid,
     bC3:              bC3,
@@ -1414,7 +1436,7 @@ function computeDiagnostics(running, instant, params) {
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR, fexp:p.fexp, blend_exp:p.blend_exp,
-    FAPARmax: FAPARmax, fM: fM, fMexp: p.fMexp,
+    FAPARmax: FAPARmax, fM: fMgpp, // historical output alias for the GPP seasonal factor
     fge:ee.Algorithms.If(instant.contains('GE'),fge,p.fge_exp===0?1:null), fge_exp:p.fge_exp, GE_for_GPP:ee.Algorithms.If(instant.contains('GE'),instant.get('GE',0),null),
     FIPAR:            FIPAR, FIPAR_method:p.fiparMethod,
     FPAR_mode: p.useSharedFPAR ? 'shared FAPAR' : 'separate FAPAR/FIPAR',
@@ -1445,7 +1467,7 @@ function computeDiagnostics(running, instant, params) {
  */
 // Reset in the period containing Jan 1 (north/equator) or DOY 182 (south).
 // Missing periods retain no invented peaks; first valid period seeds each season.
-function seasonalFAPARState(fapar,latitude,periodEnd,state,p) {
+function seasonalFAPARState(fapar,latitude,periodEnd,state) {
   var end=ee.Date(periodEnd).advance(-1,'second'),year=ee.Number(end.get('year'));
   var doy=ee.Number(end.getRelative('day','year')).add(1);
   var season=year.subtract(ee.Number(latitude).lt(0).and(doy.lt(182)));
@@ -1453,7 +1475,7 @@ function seasonalFAPARState(fapar,latitude,periodEnd,state,p) {
   var previous=ee.Number(ee.Algorithms.If(state.contains('FAPARmax'),state.get('FAPARmax'),fapar));
   var maximum=ee.Number(ee.Algorithms.If(reset,fapar,previous.max(fapar)));
   var ratio=ee.Number(ee.Algorithms.If(maximum.gt(0),ee.Number(fapar).divide(ee.Number(ee.Algorithms.If(maximum.gt(0),maximum,1))),0));
-  return ee.Dictionary({FAPARmax:maximum,fM:ratio.pow(p.fMexp),FAPAR_season:season,FAPARmax_reset:reset});
+  return ee.Dictionary({FAPARmax:maximum,seasonal_ratio:ratio,FAPAR_season:season,FAPARmax_reset:reset});
 }
 function acclimStep(currentFeat, prevState, params) {
   var state = ee.Dictionary(prevState);
@@ -1539,7 +1561,7 @@ function acclimStep(currentFeat, prevState, params) {
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
-  var seasonal=seasonalFAPARState(photosyntheticFAPAR(instant,p),latitude,f.getNumber('period_end_millis'),state,p);
+  var seasonal=seasonalFAPARState(photosyntheticFAPAR(instant,p),latitude,f.getNumber('period_end_millis'),state);
   instant=instant.combine(seasonal);
   var diag = computeDiagnostics(runningNow, instant, p);
 
@@ -1885,9 +1907,12 @@ function bucketR2(rows, predicted, reference) {
   return xx > 0 && yy > 0 ? Math.max(0, Math.min(1, (xy / Math.sqrt(xx) / Math.sqrt(yy)) * (xy / Math.sqrt(xx) / Math.sqrt(yy)))) : null;
 }
 function soilChartFooter(info, field) {
-  var texture = carbonFinite(info.sand_0_30cm_pct) && carbonFinite(info.AWC_pct_vol) ?
-    info.sand_0_30cm_pct.toFixed(1) + '%; AWC: ' + info.AWC_pct_vol.toFixed(2) + '%vol' : 'unavailable';
-  return ui.Label({value: 'SoilGrids sand (0–30 cm): ' + texture + '\n' +
+  var texture = ['sand', 'silt', 'clay'].map(function(name) {
+    var pct = info[name + '_0_30cm_pct'];
+    return name + ' ' + (carbonFinite(pct) ? pct.toFixed(1) + '%' : 'unavailable');
+  }).join(', ');
+  return ui.Label({value: 'SoilGrids (0–30 cm): ' + texture + '\nAWC: ' +
+    (carbonFinite(info.AWC_pct_vol) ? info.AWC_pct_vol.toFixed(2) + '%vol' : 'unavailable') + '\n' +
     'r² (bucket vs ACCLIM): ' + (carbonFinite(info[field]) ? info[field].toFixed(2) : 'unavailable'),
     style: {fontSize: '11px', color: '#666', whiteSpace: 'pre-wrap'}});
 }
@@ -2037,7 +2062,9 @@ function runACCLIM(forcingFC, params) {
       (!isFinite(p.EVI2min) || !isFinite(p.EVI2max) || p.EVI2max <= p.EVI2min)) {
     throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
   }
-  if(typeof p.fMexp!=='number'||!isFinite(p.fMexp)||p.fMexp<0)throw new Error('fMexp must be finite and nonnegative.');
+  ['fDgpp_exp','fDtrans_exp','fMgpp_exp','fMtrans_exp'].forEach(function(key) {
+    if (typeof p[key] !== 'number' || !isFinite(p[key]) || p[key] < 0) throw new Error(key + ' must be finite and nonnegative.');
+  });
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
@@ -2087,7 +2114,8 @@ function finishACCLIM(baseline, params) {
     f = f.set('FAPAR_method_requested', p.faparMethod);
     if (p.faparMethod === 'EVI2' && !p.fitEVI2) {
       f = f.set({FAPAR_method: 'EVI2', FAPAR_fit_status: 'fixed bounds',
-        FAPAR_EVI2min: p.EVI2min, FAPAR_EVI2max: p.EVI2max});
+        FAPAR_EVI2min: p.EVI2min, FAPAR_EVI2max: p.EVI2max,
+        FAPAR_EVI2exp_used: p.powerFixedEVI2 ? p.EVI2exp : 1});
     } else if (p.faparMethod === 'EVI2') {
       f = f.set({FAPAR_method: ee.Algorithms.If(p.faparFit.valid, 'EVI2', 'NDVI'),
         FAPAR_fit_status: ee.Algorithms.If(p.faparFit.valid, p.fitEVI2maxFixed ? 'fitted minimum; fixed maximum 0.6' : 'fitted', 'NDVI fallback: invalid fit or endpoint range'),
@@ -2288,9 +2316,26 @@ function fetchHistoricalVIMinima(geom,start,key,params,request,done) {
   batch();
 }
 
+// Keep up to five input bundles in this app session. The batch runner supplies a disk store.
+var recentInputBundles = [];
+var sessionInputStore = {
+  get:function(key) {
+    for (var i=0;i<recentInputBundles.length;i++) {
+      if (recentInputBundles[i].key===key) return recentInputBundles[i].bundle;
+    }
+    return null;
+  },
+  put:function(key,bundle) {
+    recentInputBundles=recentInputBundles.filter(function(item){return item.key!==key;});
+    recentInputBundles.push({key:key,bundle:bundle});
+    if (recentInputBundles.length>5) recentInputBundles.shift();
+  }
+};
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
-  params=mergeParams(ACCLIM_PARAMS,params||{});
+  var overrides = params || {};
+  var autoNDVI = overrides.autoSoilNDVImin === true, autoEVI2 = overrides.autoSoilEVI2min === true;
+  params=mergeParams(ACCLIM_PARAMS,overrides);
   if(params.faparMethod==='NDVI_GE_OFFSET')params.fitNDVIminGE=true;
   var gePeriods=[],ndviFit,historicalFit;
   function complete(rows){
@@ -2304,7 +2349,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
-      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':'configured';
+      d.ndvi_min_used=params.ndvi_min;d.ndvi_min_source=params.fitVIMinP05?'10-year observed fifth percentile':params.fitNDVIminGE?'NDVI at GE′=0':autoNDVI?'SoilGrids texture':'configured';
       if(historicalFit){d.ndvi_min_p05=historicalFit.ndvi;d.evi2_min_p05=historicalFit.evi2;d.vi_baseline_n=historicalFit.n;d.vi_baseline_start=historicalFit.start;d.vi_baseline_end=historicalFit.end;d.vi_baseline_first_observation=historicalFit.first;d.vi_baseline_last_observation=historicalFit.last;}
       if(ndviFit){d.ndvi_min_fit_n=ndviFit.n;d.ndvi_min_fit_slope=ndviFit.slope;d.ndvi_min_fit_r2=ndviFit.r2;
         d.ndvi_min_fit_extrapolated=ndviFit.extrapolated;d.ndvi_min_fit_start=start;d.ndvi_min_fit_end=end;}
@@ -2364,12 +2409,22 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     if(lastRecord.period_days)last=carbonDateString(carbonDateMillis(lastRecord.date)+(lastRecord.period_days-1)*86400000);
   }
   var spec=SATELLITE_SOURCES[cfg.satelliteSource||'MODIS16'],pad=spec.gap+32;
+  // Bump the version if sampling, QA, or GE aggregation semantics change.
+  var inputKey=JSON.stringify(['ACCLIM-inputs-v1',geom.serialize(),start,end,first,last,
+    cfg.weatherPlan?'tower':(cfg.weatherSource||'TERRACLIMATE'),cfg.satelliteSource||'MODIS16',cfg.timestep]);
+  var store=cfg.inputStore||sessionInputStore;
+  var saved=cfg.refreshInputs?null:store.get(inputKey);
+  var weatherRows=[],diagnosticRows=null;
+  function alignAndSimulate(rawSatellite) {
+    cfg.alignedSatellite=carbonRowsToFC(alignSatelliteRows(rawSatellite,first,last,cfg.satelliteSource||'MODIS16'));
+    simulate();
+  }
   var cursor=carbonDateMillis(first)-pad*86400000, stop=carbonDateMillis(last)+pad*86400000, sampled=[];
   function satelliteBatch() {
     if(request!==UI._requestId)return;
     if(cursor>stop) {
-      cfg.alignedSatellite=carbonRowsToFC(alignSatelliteRows(sampled,first,last,cfg.satelliteSource||'MODIS16'));
-      simulate();return;
+      if (diagnosticRows!==null) store.put(inputKey,{weather:weatherRows,satellite:sampled,ge:diagnosticRows});
+      alignAndSimulate(sampled);return;
     }
     var next=Math.min(cursor+90*86400000,stop+86400000),a=carbonDateString(cursor),b=carbonDateString(next-86400000);
     setStatus('Sampling satellite reflectance: '+a+' to '+b+'...');
@@ -2378,17 +2433,27 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     });
   }
   function startInputs(){
+  var weatherKey=cfg.weatherSource||'TERRACLIMATE';
+  function useWeather(rows) {
+    cfg.sampledWeather=carbonRowsToFC(aggregateWeatherPeriods(rows,periods,WEATHER_SOURCES[weatherKey].daily?'daily':'monthly'));
+  }
+  if (saved) {
+    setStatus('Reusing weather and satellite inputs for this location...');
+    if (!cfg.weatherPlan) useWeather(saved.weather);
+    alignAndSimulate(saved.satellite);
+    return;
+  }
   if(cfg.weatherPlan)satelliteBatch();
   else {
     setStatus('Sampling selected weather data...');
-    var weatherKey=cfg.weatherSource||'TERRACLIMATE';
     var weatherStart=WEATHER_SOURCES[weatherKey].daily?first:first.slice(0,7)+'-01';
     materialize(sampleWeather(geom,weatherStart,last,weatherKey),function(rows) {
-      cfg.sampledWeather=carbonRowsToFC(aggregateWeatherPeriods(rows,periods,WEATHER_SOURCES[weatherKey].daily?'daily':'monthly'));satelliteBatch();
+      weatherRows=rows;useWeather(rows);satelliteBatch();
     });
   }
   }
-  fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
+  function useGE(diagnostic,error){
+    diagnosticRows=error?null:diagnostic;
     if(request!==UI._requestId)return;
     if(error&&(params.fitNDVIminGE||((params.faparMethod==='FGE' || params.faparMethod==='GE_NDVI_MIN' || params.faparMethod==='NDVI_BLEND' || params.fiparMethod==='NDVI_BLEND') && params.fge_exp>0))){done(null,error);return;}
     try{
@@ -2402,11 +2467,34 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
           cfg.modelParams=params;startInputs();
         });return;
       }
-      cfg.modelParams=params;
-      setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+(params.fitNDVIminGE?' from GE′=0':' (configured)')+'; preparing model inputs...');
-      startInputs();
+      function prepareInputs() {
+        if (params.ndvi_max <= params.ndvi_min || params.EVI2max <= params.EVI2min) {
+          done(null,'Each VI maximum must exceed its resolved minimum. Check vegetation parameters.');
+          return;
+        }
+        cfg.modelParams=params;
+        setStatus('NDVImin = '+params.ndvi_min.toFixed(4)+', EVI2min = '+params.EVI2min.toFixed(4)+'; preparing model inputs...');
+        startInputs();
+      }
+      if ((autoNDVI && !params.fitNDVIminGE) || autoEVI2) {
+        fetchSoilGridsTexture(geom).evaluate(function(texture, error) {
+          if (request !== UI._requestId) return;
+          var soil = !error && texture && soilSpectralEstimate(texture);
+          if (!soil) {
+            done(null,'SoilGrids texture unavailable for this location. Clear Auto: SoilGrids texture and enter numerical VI minima to run.');
+            return;
+          }
+          if (autoNDVI && !params.fitNDVIminGE) params.ndvi_min = soil.ndvi;
+          if (autoEVI2) params.EVI2min = soil.evi2;
+          try { prepareInputs(); } catch (err) { done(null,err.message); }
+        });
+      } else {
+        prepareInputs();
+      }
     }catch(error){done(null,error.message);}
-  });
+  }
+  if (saved) useGE(saved.ge);
+  else fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,useGE);
 }
 
 function runForGeometry(geom, startDate, endDate, paramOverrides, config) {
@@ -2992,18 +3080,34 @@ function carbonRowsToFC(rows) {
 // Thickness-weight the 0-5, 5-15 and 15-30 cm mean predictions (5:10:15).
 // Arithmetic intersects depth masks, so incomplete profiles are not filled.
 // https://docs.isric.org/globaldata/soilgrids/access_on_gee.html
-function fetchSoilGridsSand(geom) {
-  var sand = ee.Image('projects/soilgrids-isric/sand_mean')
-    .select(['sand_0-5cm_mean', 'sand_5-15cm_mean', 'sand_15-30cm_mean']);
-  sand = sand.updateMask(sand.gte(0).and(sand.lte(1000)));
-  var sand030 = sand.select('sand_0-5cm_mean').multiply(5)
-    .add(sand.select('sand_5-15cm_mean').multiply(10))
-    .add(sand.select('sand_15-30cm_mean').multiply(15))
-    .divide(30).divide(10).rename('sand_0_30cm_pct');
-  // Point: local pixel. Polygon: spatial mean of the depth-weighted pixels.
-  return sand030.reduceRegion({reducer: ee.Reducer.mean(), geometry: geom,
-    crs: sand.select('sand_0-5cm_mean').projection(), scale: 250,
-    maxPixels: 1e10, tileScale: 4});
+function fetchSoilGridsTexture(geom) {
+  function depthMean(name) {
+    var layers = ee.Image('projects/soilgrids-isric/' + name + '_mean');
+    var valid = layers.updateMask(layers.gte(0).and(layers.lte(1000)));
+    // SoilGrids g/kg to mass %, weighted by layer thickness over 0–30 cm.
+    return valid.select(name + '_0-5cm_mean').multiply(5)
+      .add(valid.select(name + '_5-15cm_mean').multiply(10))
+      .add(valid.select(name + '_15-30cm_mean').multiply(15))
+      .divide(300).rename(name + '_0_30cm_pct');
+  }
+  var sand = depthMean('sand');
+  return sand.addBands(depthMean('silt')).addBands(depthMean('clay')).reduceRegion({
+    reducer: ee.Reducer.mean(), geometry: geom, crs: sand.projection(),
+    scale: 250, maxPixels: 1e10, tileScale: 4});
+}
+
+// Approximate endmembers read from "Soil spectra in VNIR region":
+// https://lcluc.umd.edu/sites/default/files/lcluc_documents/Chirag.pdf
+// Sand/silt/clay at 640 nm: 0.26/0.32/0.26; at 850 nm: 0.37/0.42/0.33.
+function soilSpectralEstimate(texture) {
+  var sand = texture.sand_0_30cm_pct, silt = texture.silt_0_30cm_pct, clay = texture.clay_0_30cm_pct;
+  var valid = [sand, silt, clay].every(function(x) { return carbonFinite(x) && x >= 0 && x <= 100; });
+  var total = sand + silt + clay;
+  if (!valid || total <= 0) return null;
+  var red = (0.26 * sand + 0.32 * silt + 0.26 * clay) / total;
+  var nir = (0.37 * sand + 0.42 * silt + 0.33 * clay) / total;
+  return {red: red, nir: nir, ndvi: (nir - red) / (nir + red),
+    evi2: 2.5 * (nir - red) / (nir + 2.4 * red + 1)};
 }
 
 // User-supplied Relative AWC versus sand (% by mass) plot.
@@ -3259,12 +3363,12 @@ function loadCarbonProducts(output, geom, start, end, requestId, regionName, c4C
   function ready(texture, error) {
     if (requestId !== UI._requestId) return;
     loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName,
-      error || !texture ? null : texture.sand_0_30cm_pct, c4Chart);
+      error || !texture ? {} : texture, c4Chart);
   }
   // Texture failure leaves depths missing but does not suppress other outputs.
-  try { fetchSoilGridsSand(geom).evaluate(ready); } catch (error) { ready(null, error); }
+  try { fetchSoilGridsTexture(geom).evaluate(ready); } catch (error) { ready(null, error); }
 }
-function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, sandPercent, c4Chart) {
+function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regionName, texture, c4Chart) {
   var context = fetchCarbonAnnualContext(geom, start, end, {weatherPlan:UI._runWeatherPlan,weatherSource:UI._lastRun.weatherSource,satelliteSource:UI._lastRun.satelliteSource});
   var monthlyProperties = output.toList(output.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); });
   var annualProperties = context.toList(context.size().max(1)).map(function(f) { return ee.Feature(f).toDictionary(); });
@@ -3282,7 +3386,9 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       result.monthly.forEach(function(row) {
         row.SM_r2 = carbonFinite(row.SMmax) ? soilR2 : null;
         row.SM_et_r2 = carbonFinite(row.SMmax_et) ? etR2 : null;
-        var depths = effectiveDepthFields(row, sandPercent);
+        var depths = effectiveDepthFields(row, texture.sand_0_30cm_pct);
+        row.silt_0_30cm_pct = carbonFinite(texture.silt_0_30cm_pct) ? texture.silt_0_30cm_pct : null;
+        row.clay_0_30cm_pct = carbonFinite(texture.clay_0_30cm_pct) ? texture.clay_0_30cm_pct : null;
         Object.keys(depths).forEach(function(key) { row[key] = depths[key]; });
         var tDepth = transpirationSourceDepth([row]);
         Object.keys(tDepth).forEach(function(key) { row[key] = tDepth[key]; });
@@ -3348,6 +3454,10 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
         addSoilMoistureChart(output, geom, requestId, regionName, bucketInfo);
       }
       c4Chart(result.monthly,null);
+      var soil = soilSpectralEstimate(texture);
+      addChartNote(ui.Label('Texture-based bare-soil estimate (0–30 cm): ' + (soil ?
+        'R (640 nm) = ' + soil.red.toFixed(3) + ', NIR (850 nm) = ' + soil.nir.toFixed(3) +
+        ', NDVImin = ' + soil.ndvi.toFixed(3) + ', EVI2min = ' + soil.evi2.toFixed(3) : 'unavailable')));
       if (bucketInfo.FAPAR_method_requested === 'EVI2') {
         addChartNote(ui.Label(bucketInfo.FAPAR_method === 'EVI2'
           ? 'FAPAR = EVI2 scaled between EVI2min=' + bucketInfo.FAPAR_EVI2min.toFixed(3) +
@@ -4081,18 +4191,25 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = EVI2 scaled to fixed bounds', value: 'EVI2_FIXED'}], value: 'FIPAR',
+  {label: 'FAPAR = scaled EVI2 (fixed bounds, EVI2exp)', value: 'EVI2_FIXED_POWER'}], value: 'EVI2_FIXED_POWER',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+UI.reuseInputs=ui.Checkbox({label:'Reuse sampled weather and satellite inputs',value:true});
+UI.inputPanel.add(UI.reuseInputs);
 UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
 UI.vegetationParameters = {};
+UI.soilMinimumSelectors = {};
 [
   {key:'GE_scale', label:'GE_scale'},
   {key:'ndvi_exp', label:'ndvi_exp'},
   {key:'FAPARmult', label:'FAPARmult (direct FIPAR option)'},
-  {key:'fMexp', label:'fMexp (seasonal FAPAR multiplier; 0 disables)'},
+  {key:'fDgpp_exp', label:'fDgpp_exp (GPP VPD response; 0 disables)'},
+  {key:'fDtrans_exp', label:'fDtrans_exp (transpiration VPD response; 0 disables)'},
+  {key:'fMtrans_exp', label:'fMtrans_exp (transpiration seasonal FAPAR response; 0 disables)'},
+  {key:'fMgpp_exp', label:'fMgpp_exp (GPP seasonal FAPAR response; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
+  {key:'EVI2exp', label:'EVI2exp (scaled EVI2)'},
   {key:'EVI2max', label:'EVI2max'},
   {key:'ndvi_min', label:'NDVImin'},
   {key:'ndvi_max', label:'NDVImax'}
@@ -4101,19 +4218,32 @@ UI.vegetationParameters = {};
   var input = ui.Textbox({value:String(ACCLIM_PARAMS[parameter.key]), style:{stretch:'horizontal'}});
   UI.vegetationParameters[parameter.key] = input;
   UI.inputPanel.add(input);
+  if (parameter.key === 'EVI2min' || parameter.key === 'ndvi_min') {
+    var auto = ui.Checkbox({label:'Auto: SoilGrids texture', value:false,
+      onChange:function(selected) { input.setDisabled(selected); }});
+    UI.soilMinimumSelectors[parameter.key] = auto;
+    UI.inputPanel.add(auto);
+  }
 });
 UI.inputPanel.add(ui.Label('Fitted/percentile methods estimate their bounds for each run. The fixed-maximum experiment uses EVI2max = 0.6.'));
 function readVegetationParameters() {
   var values = {};
   Object.keys(UI.vegetationParameters).forEach(function(key) {
     var text = UI.vegetationParameters[key].getValue().trim();
+    if (UI.soilMinimumSelectors[key] && UI.soilMinimumSelectors[key].getValue()) {
+      values[key === 'ndvi_min' ? 'autoSoilNDVImin' : 'autoSoilEVI2min'] = true;
+      return;
+    }
     var value = Number(text);
     if (!text || !isFinite(value)) throw new Error(key + ' must be a finite number.');
     values[key] = value;
   });
   if (values.GE_scale <= 0) throw new Error('GE_scale must be positive.');
   if (values.FAPARmult < 0) throw new Error('FAPARmult must be nonnegative.');
-  if (values.fMexp < 0) throw new Error('fMexp must be nonnegative.');
+  ['fDgpp_exp','fDtrans_exp','fMgpp_exp','fMtrans_exp'].forEach(function(key) {
+    if (values[key] < 0) throw new Error(key + ' must be nonnegative.');
+  });
+  if (values.EVI2exp < 0) throw new Error('EVI2exp must be nonnegative.');
   if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
   if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
   if (values.EVI2max <= values.EVI2min) throw new Error('EVI2max must exceed EVI2min.');
@@ -4717,8 +4847,8 @@ function onRun() {
         return;
       }
       try {
-    var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
+    var runDataConfig={refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
+    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
@@ -4756,14 +4886,14 @@ function onRun() {
       conductanceChart.setOptions(conductanceOptions);
       chartCache.ready.forEach(function(ready) { ready(); });
       chartCache.ready = [];
-      addOptionalSeriesChart(chartCache, ['FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge', 'NIRv'],
-        ['FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge', 'NIRv'],
-        ['#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60', '#43A047'], [2, 3, 4, 5, 6, 7, 8], {
-          series: {0: {color: '#000000', lineDashStyle: [6, 4]},
-            1: {color: '#1976D2', lineDashStyle: [6, 4]},
-            2: {color: '#2E7D32'}, 3: {color: '#8E24AA'},
-            4: {color: '#EF6C00', targetAxisIndex: 1}},
-          title: regionChartTitle('FAPAR & C4 Fraction', regionName), chartArea: {top: 80},
+      addOptionalSeriesChart(chartCache, ['FIPAR', 'FAPAR', 'C4frac', 'NDVI', 'EVI2', 'LAI', 'GE', 'GE_normalized', 'fge', 'NIRv'],
+        ['FIPAR', 'FAPAR', 'C4 fraction', 'NDVI', 'EVI2', 'Green LAI', 'GE', 'GE′', 'fge', 'NIRv'],
+        ['#D55E00', '#000000', '#1976D2', '#2E7D32', '#8E24AA', '#EF6C00', '#00838F', '#795548', '#D81B60', '#43A047'], [3, 4, 5, 6, 7, 8, 9], {
+          series: {0: {color: '#D55E00'}, 1: {color: '#000000', lineDashStyle: [6, 4]},
+            2: {color: '#1976D2', lineDashStyle: [6, 4]},
+            3: {color: '#2E7D32'}, 4: {color: '#8E24AA'},
+            5: {color: '#EF6C00', targetAxisIndex: 1}},
+          title: regionChartTitle('FAPAR, FIPAR & C4 Fraction', regionName), chartArea: {top: 80},
           hAxis: {title: 'Date'},
           vAxes: {0: {title: 'Fraction / vegetation index'},
             1: {title: 'Green LAI (m² leaf/m² ground)', viewWindow: {min: 0},
