@@ -48,12 +48,14 @@ function rtGroups(features, year, start, end) {
   return groups;
 }
 function rtApp() {
+  var previous = ui.root.widgets().getJsArray().slice();
   var map = ui.Map();
   map.setCenter(-120.966, 38.4309, 11);
   var panel = ui.Panel({style: {width: '470px', padding: '10px'}});
   var charts = ui.Panel();
   ui.root.clear();
   ui.root.add(ui.SplitPanel(panel, map));
+  panel.add(ui.Button('Return to ACCLIM', function(){token++;ui.root.widgets().reset(previous);}));
   panel.add(ui.Label('ACCLIM-RT', {fontSize: '22px', fontWeight: 'bold'}));
   panel.add(ui.Label('Whole-pixel foliage cover from Aqua MODIS red and NIR. Each observation date has a shared fitted background.'));
   var source = ui.Select({items: ['Coordinates / map click', 'FeatureCollection asset center'],
@@ -69,7 +71,7 @@ function rtApp() {
   field('Start date (YYYY-MM-DD)', start); field('End date, inclusive (YYYY-MM-DD)', end);
   field('Box side (km)', box);
   field('Near-best background RMSE tolerance (BRF)', tolerance);
-  panel.add(ui.Label('MYD09A1 retains selected acquisitions within each 8-day composite. The fit uses their actual dates and angles. Leaf properties are fixed; fcover = 1 − exp(−0.5 × LAI).'));
+  panel.add(ui.Label('MYD09A1 retains selected acquisitions within each 8-day composite. The fit uses their actual dates and angles. Leaf properties are fixed; fcover = 1 âˆ’ exp(âˆ’0.5 Ã— LAI).'));
   var status = ui.Label('Ready.');
   var run = ui.Button('Run ACCLIM-RT'), cancel = ui.Button('Cancel');
   panel.add(ui.Panel([run, cancel], ui.Panel.Layout.flow('horizontal')));
@@ -124,7 +126,7 @@ function rtApp() {
       .setOptions({title: 'Foliage cover', hAxis: {title: 'Date', format: 'yyyy-MM-dd'},
         vAxis: {title: 'Fraction', viewWindow: {min: 0, max: 1}}, pointSize: 3, lineWidth: 1}));
     charts.add(ui.Chart(timeTable(complete, ['rmse'])).setChartType('LineChart')
-      .setOptions({title: 'Joint red�NIR RMSE', hAxis: {title: 'Date', format: 'yyyy-MM-dd'}, pointSize: 3}));
+      .setOptions({title: 'Joint red–NIR RMSE', hAxis: {title: 'Date', format: 'yyyy-MM-dd'}, pointSize: 3}));
     charts.add(ui.Label('Cover bounds span near-best backgrounds. Coverage is the percentage of native box pixels observed on that actual date.'));
     download('Download date summary CSV', summaries, 'acclim_rt_dates', charts);
     var dates = complete.map(function (r) { return r.date; });
@@ -139,13 +141,13 @@ function rtApp() {
       var profile = {cols: [{label: 'Median fcover', type: 'number'}, {label: 'RMSE', type: 'number'}],
         rows: fit.profile.map(function (r) { return {c: [{v: r.fcover}, {v: r.rmse}]}; })};
       details.add(ui.Chart(profile).setChartType('ScatterChart')
-        .setOptions({title: day + ' — RMSE vs median fcover',
-          hAxis: {title: 'Median fcover'}, vAxis: {title: 'Joint red–NIR RMSE'}, pointSize: 2, legend: 'none'}));
+        .setOptions({title: day + ' â€” RMSE vs median fcover',
+          hAxis: {title: 'Median fcover'}, vAxis: {title: 'Joint redâ€“NIR RMSE'}, pointSize: 2, legend: 'none'}));
       details.add(ui.Label('Background red ' + fit.background_red.toFixed(2) +
         ', NIR ' + fit.background_nir.toFixed(2) + '; median LAI ' + fit.lai.toFixed(2) +
         '; ' + fit.pixels + ' pixels, ' + fit.geometries + ' distinct geometries.'));
       download('Download pixel fcover CSV', fit.records, 'acclim_rt_pixels_' + day, details);
-      download('Download RMSE–fcover CSV', fit.profile, 'acclim_rt_profile_' + day, details);
+      download('Download RMSEâ€“fcover CSV', fit.profile, 'acclim_rt_profile_' + day, details);
     }
     showDate(chooser.getValue());
   }
@@ -261,7 +263,7 @@ function rtApp() {
       var latitude = Number(lat.getValue()), longitude = Number(lon.getValue());
       if (!lat.getValue().trim() || !lon.getValue().trim() || !isFinite(latitude) || !isFinite(longitude) ||
           latitude < -80 || latitude > 84 || longitude < -180 || longitude > 180) {
-        fail('Enter longitude −180 to 180 and latitude −80 to 84 (UTM box).'); return;
+        fail('Enter longitude âˆ’180 to 180 and latitude âˆ’80 to 84 (UTM box).'); return;
       }
       begin(longitude, latitude);
     }

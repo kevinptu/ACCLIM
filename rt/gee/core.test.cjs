@@ -6,7 +6,7 @@ const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
 const context = vm.createContext({console});
-vm.runInContext(fs.readFileSync(path.join(__dirname, 'ACCLIM_RT_GEE.js'), 'utf8'), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, 'ACCLIM_RT_GEE.js'), 'utf8').split('// BEGIN ACCLIM-RT RETRIEVAL')[1].split('// END ACCLIM-RT RETRIEVAL')[0], context);
 const {RT, rtGroups, rtISODate} = context;
 let maximumError = 0;
 for (const reference of JSON.parse(fs.readFileSync(path.join(__dirname, 'reference_brf.json')))) {
@@ -44,3 +44,15 @@ assert.equal(result.background_nir, .19);
 assert.equal(result.records.length, 4);
 console.log('PASS BRF reference, hotspot, date boundaries, duplicate screening, zero cover, and geometry reuse.');
 console.log('Maximum reference BRF error:', maximumError);
+const day = 86400000;
+const obs = [{millis:0,cover:0},{millis:2*day,cover:.6},{millis:40*day,cover:.8}];
+function period(cadence, days) {
+  return context.rtCoverPeriods(obs,[{date:'test',millis:0,period_end_millis:days*day,
+    period_days:days,model_cadence:cadence}],32).test;
+}
+assert.equal(period('daily',1).rt_fcover,0);
+assert.equal(period('weekly',3).rt_interpolated_days,1);
+assert(Math.abs(period('weekly',3).rt_fcover-.3)<1e-12);
+assert.equal(period('weekly',7).rt_fcover,undefined);
+assert.equal(period('monthly',31).rt_fcover,.3);
+assert.equal(fit.bestMedianCover(), result.fcover);

@@ -184,7 +184,12 @@ var RT = (function () {
         near_backgrounds: near.length, pixels: pixels.length, geometries: keys.length,
         profile: profile, records: records};
     }
-    return {step: step, finish: finish, geometries: keys.length};
+    function bestMedianCover() {
+      var best = 0;
+      for (var s = 1; s < costs.length; s++) if (costs[s] < costs[best]) best = s;
+      return median(choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); }));
+    }
+    return {step: step, finish: finish, bestMedianCover: bestMedianCover, geometries: keys.length};
   }
   return {createFit: createFit, valid: valid, geometry: geometry, spectrum: spectrum, median: median};
 }());

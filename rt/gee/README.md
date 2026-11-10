@@ -1,6 +1,6 @@
 # ACCLIM-RT Earth Engine app
 
-Paste the entire generated **ACCLIM_RT_GEE.js** into a new Earth Engine Code Editor script, save it, and run. Publish it using the Code Editor Apps dialog when ready. The script contains the optical constants, numerical fitter, data request, and UI. It requires no Python service or private model asset at runtime. A FeatureCollection supplied as a location must be accessible to the app's users.
+Paste the entire generated **ACCLIM_RT_GEE.js** into a new Earth Engine Code Editor script, save it, and run. Publish it using the Code Editor Apps dialog when ready. The script opens the full ACCLIM model. Choose **FAPAR = PROSAIL fcover**, **FIPAR = PROSAIL fcover**, or both in the existing menus. The retrieval runs for these selections and uses a configurable box centered on the model geometry (default 10 km). Selecting PROSAIL for FIPAR clears the shared-FAPAR override so the water selection takes effect. The PROSAIL retrieval diagnostics button opens the per-date plots and pixel exports. It requires no Python service or private model asset at runtime. A FeatureCollection supplied as a location must be accessible to the app's users.
 
 The Drive reference is G:/My Drive/Model/ACCLIM/ACCLIM_RT_GEE_web_app_script.txt. The GitHub copy is maintained on the ACCLIM-RT branch. For edits, check the Drive copy for user changes before rebuilding or replacing it.
 
@@ -33,7 +33,10 @@ The soil-template subset is omitted. The broad grid and fitting objective match 
 
 ## Relation to ACCLIM FAPAR and FIPAR
 
-The estimated quantity is projected nadir foliage cover under the specified LAI, leaf-angle, and clumping assumptions. The date and pixel exports make it available for research comparisons with ACCLIM FAPAR/FIPAR. Applying it to carbon or water calculations requires choosing the mapping and temporal/spatial alignment. This script provides the retrieval and diagnostics as a standalone research app.
+For a selected PROSAIL fraction the model uses the date-specific spatial median of projected nadir foliage cover directly. A selected FAPAR equals cover even when fexp differs from 1. FIPAR feeds canopy energy and water partitioning, including the gridded net-radiation calculation. The model keeps its selected weather and satellite sources for its other inputs.
+
+Daily cover uses linear interpolation between bracketing acquisitions up to 32 days apart. The retrieval includes 32 days on either side of the request for bracketing. Weekly periods take the mean with complete daily coverage. Monthly periods take the median of available daily estimates. rt_observed_days, rt_interpolated_days and rt_missing_pct describe coverage. Periods without sufficient coverage have unavailable physiology. Repeated experiments can reuse the same fitted dates through the existing input cache.
+
 
 ## Build and verification
 
