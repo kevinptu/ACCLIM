@@ -31,3 +31,10 @@ Outputs include the simulated spectral library, full-data endmembers and scatter
 
 [PROSAIL implementation](https://github.com/jgomezdans/prosail) · [MODIS Aqua reflectance product](https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MYD09A1)
 
+## Norunda cover sensitivity
+
+    python rt/cover_sensitivity.py Norunda.csv results/Norunda-cover --date 2024-06-02
+
+Fits both observed bands with equal weights. PROSPECT-D leaf parameters are fixed (N 1.5, Cab 40, Car 8, brown pigment 0, water 0.015 cm, dry mass 0.009 g/cm²). Each independent run fixes patch LAI at 3, 5, or 7, uses a spherical leaf-angle distribution and hotspot parameter 0.05, and evaluates directional FourSAIL at each pixel's MODIS geometry. The same common Lambertian soil pair is used under the patch and in the exposed fraction. Soil BRF is constant within each band. Per-pixel cover minimizes the two-band squared residual by projection onto the soil-to-patch segment, constrained to [0,1]. A second optimization constrains every pixel to [0.8,1].
+
+The broad soil grid spans red 0.01–0.40 and NIR from red to 0.50, spaced by 0.01. A restricted subset lies within Euclidean distance 0.01 of a PROSAIL wet/dry soil mixture with brightness 0.5–1.5. The reported ranges include soil pairs within 0.001, 0.002 or 0.005 absolute BRF of the best joint RMSE **within each family and LAI**. They are sensitivity intervals. The fits measure spectral reconstruction; independent canopy cover is needed to assess retrieval accuracy.
