@@ -26,7 +26,7 @@ var ACCLIM_PARAMS = {
   fge_exp: 1,             // Raw GE / GE_scale exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
-  fMexp:       1,      // Seasonal FAPAR / running seasonal maximum exponent
+  fMgpp_exp: 1,  // GPP seasonal FAPAR response
   FAPARmult: 1,          // Multiplier for the direct FIPAR option
   faparMethod: 'EVI2',     // Fixed bounds by default; optional SoilGrids minima resolve per location
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
@@ -39,9 +39,9 @@ var ACCLIM_PARAMS = {
   fANPP_slope:    0.0129,
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
-  fDexp_T: 0,             // Canopy transpiration exponent on the existing fD factor
-  fMexp_T: 0,             // Canopy transpiration exponent on the existing fM factor
-  fDexp:          0,      // VPD attenuation exponent (VPDday_mean in kPa)
+  fDtrans_exp: 0,  // transpiration VPD response
+  fMtrans_exp: 0,  // transpiration seasonal FAPAR response
+  fDgpp_exp: 0,  // GPP VPD response
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
@@ -1280,26 +1280,28 @@ function computeDiagnostics(running, instant, params) {
   // VPD * 1000 / Pmean is Pa/Pa, so zC3 is umol/mol (ppm).
   // The vegetation ratio no longer cancels when FAPAR differs from FIPAR.
   // A numerical floor avoids division by zero; flag these non-identifiable cases.
-  // fD = min(1, 1 / VPDday_mean^fDexp); max(1) avoids division by zero.
-  var fD = ee.Number(1).divide(VPDday_mean.pow(p.fDexp).max(1));
-  var fM=ee.Number(ee.Algorithms.If(instant.contains('fM'),instant.get('fM'),1));
-  // T = Tbase * fD^fDexp_T * fM^fMexp_T. Zero exponents disable each factor.
-  var dTrans = p.fDexp_T === 0 ? ee.Number(1) : fD.pow(p.fDexp_T);
-  var mTrans = p.fMexp_T === 0 ? ee.Number(1) : fM.pow(p.fMexp_T);
-  var transpirationFactor = dTrans.multiply(mTrans);
-  // The C3 WUE equation uses the ratio of the carbon and transpiration factors.
-  // At zero transpiration the ratio is unidentified; use a finite internal value.
+  // Each exponent acts directly on a raw environmental response, once per flux.
+  var vpdResponse = ee.Number(1).divide(VPDday_mean.max(1)); // VPD in kPa
+  var seasonalRatio = ee.Number(instant.get('seasonal_ratio', 1)); // FAPAR / running maximum
+  var fDgpp = p.fDgpp_exp === 0 ? ee.Number(1) : vpdResponse.pow(p.fDgpp_exp);
+  var fDtrans = p.fDtrans_exp === 0 ? ee.Number(1) : vpdResponse.pow(p.fDtrans_exp);
+  var fMgpp = p.fMgpp_exp === 0 ? ee.Number(1) : seasonalRatio.pow(p.fMgpp_exp);
+  var fMtrans = p.fMtrans_exp === 0 ? ee.Number(1) : seasonalRatio.pow(p.fMtrans_exp);
+  var gppFactor = fDgpp.multiply(fMgpp);
+  var transpirationFactor = fDtrans.multiply(fMtrans);
   var validTransRatio = transpirationFactor.gt(0);
+  // At zero T multiplier, A/T is unidentified. Retain the flagged internal fallback.
   var carbonWaterFactor = ee.Number(ee.Algorithms.If(validTransRatio,
-    fD.multiply(fM).divide(ee.Number(ee.Algorithms.If(validTransRatio, transpirationFactor, 1))), 1));
+    gppFactor.divide(ee.Number(ee.Algorithms.If(validTransRatio, transpirationFactor, 1))), 1));
   var faparFiparValid = FIPAR.gt(1e-9);
   var faparFiparRatio = (p.useSharedFPAR || (p.faparMethod === 'FIPAR' && p.fexp === 1 && directFIPARMultiplier(p) === 1)) ? ee.Number(1) : FAPAR.divide(FIPAR.max(1e-9));
   var zCoef = ee.Number(1.5).multiply(p.GPPmean2GPPmax).multiply(2500).multiply(18)
     .divide(ee.Number(p.QRC3).multiply(p.PT_coef).multiply(ee.Number(1).add(p.fresp)));
-  var zC3 = zCoef.multiply(
+  var zMet = zCoef.multiply(
     s_mean.add(p.gamma_psy).multiply(VPDday_mean).multiply(PARday_mean).multiply(1000)
-  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean)).multiply(faparFiparRatio)
-    .multiply(carbonWaterFactor);
+  ).divide(s_mean.multiply(Rnday_mean).multiply(Pmean));
+  // zC3 = meteorological term * FAPAR/FIPAR * GPP factors / transpiration factors.
+  var zC3 = zMet.multiply(faparFiparRatio).multiply(carbonWaterFactor);
 
   // Quadratic solves ciC3 in ppm, using Gamma* converted from Pa to ppm.
   // a=1, b=2*gamma_ppm+zC3-ca_mean, c=-gamma_ppm*(zC3+2*ca_mean).
@@ -1324,11 +1326,11 @@ function computeDiagnostics(running, instant, params) {
     .divide(piC3_mean.add(gamma_star_mean.multiply(2)));
   var QYC4_mean = fcold_mean.multiply(ee.Number(1).divide(p.QRC4));
 
-  // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean * fD * fM
+  // GPPmax (umolCO2/m2s) = QY * FAPAR * PARday_mean * fDgpp * fMgpp
   var FAPARmax=ee.Number(ee.Algorithms.If(instant.contains('FAPARmax'),instant.get('FAPARmax'),FAPAR));
   var fge=greenExcessMultiplier(instant.get('GE',0),p);
-  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
-  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(fD).multiply(fM);
+  var GPPmax_C3 = QYC3_mean.multiply(FAPAR).multiply(PARday_mean).multiply(gppFactor);
+  var GPPmax_C4 = QYC4_mean.multiply(FAPAR).multiply(PARday_mean).multiply(gppFactor);
 
   // Mean daytime GPP
   var GPPday_mean_C3 = GPPmax_C3.multiply(p.GPPmean2GPPmax);
@@ -1407,7 +1409,11 @@ function computeDiagnostics(running, instant, params) {
     gamma_star_mean:  gamma_star_mean,
     s_mean:           s_mean,
     zC3:              zC3,
-    T_multiplier: transpirationFactor, fDexp_T: p.fDexp_T, fMexp_T: p.fMexp_T,
+    T_multiplier: transpirationFactor, GPP_multiplier: gppFactor,
+    zMet: zMet, carbon_water_factor: carbonWaterFactor, seasonal_ratio: seasonalRatio,
+    fDgpp: fDgpp, fDtrans: fDtrans, fMgpp: fMgpp, fMtrans: fMtrans,
+    fDgpp_exp: p.fDgpp_exp, fDtrans_exp: p.fDtrans_exp,
+    fMgpp_exp: p.fMgpp_exp, fMtrans_exp: p.fMtrans_exp,
     ci_T_multiplier_valid: validTransRatio,
     FAPAR_FIPAR_ratio: faparFiparRatio,
     FAPAR_FIPAR_valid: faparFiparValid,
@@ -1427,7 +1433,7 @@ function computeDiagnostics(running, instant, params) {
     QYC3_mean:        QYC3_mean,
     QYC4_mean:        QYC4_mean,
     FAPAR:            FAPAR, fexp:p.fexp, blend_exp:p.blend_exp,
-    FAPARmax: FAPARmax, fM: fM, fMexp: p.fMexp,
+    FAPARmax: FAPARmax, fM: fMgpp, // historical output alias for the GPP seasonal factor
     fge:ee.Algorithms.If(instant.contains('GE'),fge,p.fge_exp===0?1:null), fge_exp:p.fge_exp, GE_for_GPP:ee.Algorithms.If(instant.contains('GE'),instant.get('GE',0),null),
     FIPAR:            FIPAR, FIPAR_method:p.fiparMethod,
     FPAR_mode: p.useSharedFPAR ? 'shared FAPAR' : 'separate FAPAR/FIPAR',
@@ -1458,7 +1464,7 @@ function computeDiagnostics(running, instant, params) {
  */
 // Reset in the period containing Jan 1 (north/equator) or DOY 182 (south).
 // Missing periods retain no invented peaks; first valid period seeds each season.
-function seasonalFAPARState(fapar,latitude,periodEnd,state,p) {
+function seasonalFAPARState(fapar,latitude,periodEnd,state) {
   var end=ee.Date(periodEnd).advance(-1,'second'),year=ee.Number(end.get('year'));
   var doy=ee.Number(end.getRelative('day','year')).add(1);
   var season=year.subtract(ee.Number(latitude).lt(0).and(doy.lt(182)));
@@ -1466,7 +1472,7 @@ function seasonalFAPARState(fapar,latitude,periodEnd,state,p) {
   var previous=ee.Number(ee.Algorithms.If(state.contains('FAPARmax'),state.get('FAPARmax'),fapar));
   var maximum=ee.Number(ee.Algorithms.If(reset,fapar,previous.max(fapar)));
   var ratio=ee.Number(ee.Algorithms.If(maximum.gt(0),ee.Number(fapar).divide(ee.Number(ee.Algorithms.If(maximum.gt(0),maximum,1))),0));
-  return ee.Dictionary({FAPARmax:maximum,fM:ratio.pow(p.fMexp),FAPAR_season:season,FAPARmax_reset:reset});
+  return ee.Dictionary({FAPARmax:maximum,seasonal_ratio:ratio,FAPAR_season:season,FAPARmax_reset:reset});
 }
 function acclimStep(currentFeat, prevState, params) {
   var state = ee.Dictionary(prevState);
@@ -1552,7 +1558,7 @@ function acclimStep(currentFeat, prevState, params) {
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
-  var seasonal=seasonalFAPARState(photosyntheticFAPAR(instant,p),latitude,f.getNumber('period_end_millis'),state,p);
+  var seasonal=seasonalFAPARState(photosyntheticFAPAR(instant,p),latitude,f.getNumber('period_end_millis'),state);
   instant=instant.combine(seasonal);
   var diag = computeDiagnostics(runningNow, instant, p);
 
@@ -2053,7 +2059,9 @@ function runACCLIM(forcingFC, params) {
       (!isFinite(p.EVI2min) || !isFinite(p.EVI2max) || p.EVI2max <= p.EVI2min)) {
     throw new Error('Fixed EVI2 bounds must be finite with EVI2max > EVI2min.');
   }
-  if(typeof p.fMexp!=='number'||!isFinite(p.fMexp)||p.fMexp<0)throw new Error('fMexp must be finite and nonnegative.');
+  ['fDgpp_exp','fDtrans_exp','fMgpp_exp','fMtrans_exp'].forEach(function(key) {
+    if (typeof p[key] !== 'number' || !isFinite(p[key]) || p[key] < 0) throw new Error(key + ' must be finite and nonnegative.');
+  });
   if (typeof p.k !== 'number' || !isFinite(p.k) || p.k <= 0) throw new Error('k must be a positive finite number.');
   if (typeof p.tc_sm !== 'number' || !isFinite(p.tc_sm) || p.tc_sm <= 0) throw new Error('tc_sm must be positive and finite.');
   if (p.useSharedFPAR) forcingFC = forcingFC.map(function(f) { return applySharedFPAR(f, p); });
@@ -4153,10 +4161,10 @@ UI.soilMinimumSelectors = {};
   {key:'GE_scale', label:'GE_scale'},
   {key:'ndvi_exp', label:'ndvi_exp'},
   {key:'FAPARmult', label:'FAPARmult (direct FIPAR option)'},
-  {key:'fDexp', label:'fDexp (VPD exponent defining fD)'},
-  {key:'fDexp_T', label:'fDexp_T (transpiration: 0 off, 1 full fD)'},
-  {key:'fMexp_T', label:'fMexp_T (transpiration: 0 off, 1 full fM)'},
-  {key:'fMexp', label:'fMexp (seasonal FAPAR multiplier; 0 disables)'},
+  {key:'fDgpp_exp', label:'fDgpp_exp (GPP VPD response; 0 disables)'},
+  {key:'fDtrans_exp', label:'fDtrans_exp (transpiration VPD response; 0 disables)'},
+  {key:'fMtrans_exp', label:'fMtrans_exp (transpiration seasonal FAPAR response; 0 disables)'},
+  {key:'fMgpp_exp', label:'fMgpp_exp (GPP seasonal FAPAR response; 0 disables)'},
   {key:'EVI2min', label:'EVI2min'},
   {key:'EVI2max', label:'EVI2max'},
   {key:'ndvi_min', label:'NDVImin'},
@@ -4188,9 +4196,9 @@ function readVegetationParameters() {
   });
   if (values.GE_scale <= 0) throw new Error('GE_scale must be positive.');
   if (values.FAPARmult < 0) throw new Error('FAPARmult must be nonnegative.');
-  if (values.fDexp < 0) throw new Error('fDexp must be nonnegative.');
-  if (values.fDexp_T < 0 || values.fMexp_T < 0) throw new Error('Transpiration exponents must be nonnegative.');
-  if (values.fMexp < 0) throw new Error('fMexp must be nonnegative.');
+  ['fDgpp_exp','fDtrans_exp','fMgpp_exp','fMtrans_exp'].forEach(function(key) {
+    if (values[key] < 0) throw new Error(key + ' must be nonnegative.');
+  });
   if (values.ndvi_exp < 0) throw new Error('ndvi_exp must be nonnegative.');
   if (values.ndvi_max <= values.ndvi_min) throw new Error('NDVImax must exceed NDVImin.');
   if (values.EVI2max <= values.EVI2min) throw new Error('EVI2max must exceed EVI2min.');

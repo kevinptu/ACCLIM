@@ -7,17 +7,17 @@ const ee={Number:x=>new Num(x),Date:date,Dictionary:dict,Algorithms:{If:(c,a,b)=
 for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_script_Private.txt']){
  const s=fs.readFileSync(file,'utf8'),c={ee};vm.createContext(c);new vm.Script(s);
  vm.runInContext(s.slice(s.indexOf('function seasonalFAPARState('),s.indexOf('function acclimStep(')),c);
- function step(f,lat,end,state={step:0},exponent=.5){return c.seasonalFAPARState(new Num(f),new Num(lat),new Num(Date.parse(end+'T00:00:00Z')),dict(state),{fMexp:exponent});}
- let r=step(.8,35,'2023-12-31');r=step(.4,35,'2024-01-01',{step:1,FAPARmax:r.get('FAPARmax'),FAPAR_season:r.get('FAPAR_season')});assert.equal(val(r.get('FAPARmax')),.8);assert(Math.abs(val(r.get('fM'))-Math.sqrt(.5))<1e-12);
- r=step(.2,35,'2024-01-02',{step:2,FAPARmax:.8,FAPAR_season:2023});assert.equal(val(r.get('FAPARmax')),.2);assert.equal(val(r.get('fM')),1);
+ function step(f,lat,end,state={step:0}){return c.seasonalFAPARState(new Num(f),new Num(lat),new Num(Date.parse(end+'T00:00:00Z')),dict(state));}
+ let r=step(.8,35,'2023-12-31');r=step(.4,35,'2024-01-01',{step:1,FAPARmax:r.get('FAPARmax'),FAPAR_season:r.get('FAPAR_season')});assert.equal(val(r.get('FAPARmax')),.8);assert(Math.abs(val(r.get('seasonal_ratio'))-.5)<1e-12);
+ r=step(.2,35,'2024-01-02',{step:2,FAPARmax:.8,FAPAR_season:2023});assert.equal(val(r.get('FAPARmax')),.2);assert.equal(val(r.get('seasonal_ratio')),1);
  // Southern Jan 1 does not reset. Leap-year June monthly interval contains DOY 182.
  r=step(.4,-35,'2024-01-02',{step:1,FAPARmax:.8,FAPAR_season:2023});assert.equal(val(r.get('FAPARmax')),.8);
  r=step(.2,-35,'2024-07-01',{step:2,FAPARmax:.8,FAPAR_season:2023});assert.equal(val(r.get('FAPARmax')),.2);
  // Non-leap June ends before DOY 182; July 1 resets.
  r=step(.2,-35,'2023-07-01',{step:2,FAPARmax:.8,FAPAR_season:2022});assert.equal(val(r.get('FAPARmax')),.8);
  r=step(.2,-35,'2023-07-02',{step:3,FAPARmax:.8,FAPAR_season:2022});assert.equal(val(r.get('FAPARmax')),.2);
- assert.equal(val(step(0,35,'2024-01-02').get('fM')),0);assert.equal(val(step(0,35,'2024-01-02',{step:0},0).get('fM')),1);
- assert.equal(val(step(1e-15,35,'2024-01-02').get('fM')),1);
+ assert.equal(val(step(0,35,'2024-01-02').get('seasonal_ratio')),0);
+ assert.equal(val(step(1e-15,35,'2024-01-02').get('seasonal_ratio')),1);
  assert(s.includes("value: 'FIPAR_GE'"));assert(s.includes("value: 'EVI2_FIXED',\n  style:"));assert(s.includes('fitNDVIminGE: false'));
 }
 console.log('PASS hemisphere resets, leap/non-leap boundaries, containing-month reset, zero/tiny FAPAR and default/optional menu wiring');
