@@ -1,6 +1,6 @@
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const core = require('../docs/tower-core.js'), zip = require('../docs/vendor/fflate-0.8.2.js');
-const [archive, output, project, parameters] = process.argv.slice(2);
+const [archive, output, project, parameters, cacheDir, refresh] = process.argv.slice(2);
 const input = fs.readFileSync(archive);
 async function main() {
   const entries = core.fluxFiles(core.archiveList(input, zip));
@@ -17,6 +17,30 @@ async function main() {
     vm.runInContext(source.slice(source.indexOf('function towerWeatherPlan('), source.indexOf('function setupTowerImport(')), ctx);
     ctx.UI = {_requestId:1}; ctx.setStatus = ()=>{};
   }
+  // Store samples only. All parameter-dependent model steps run for each invocation.
+  const crypto = require('crypto');
+  function cachePath(key) {
+    return path.join(cacheDir, crypto.createHash('sha256').update(key).digest('hex')+'.json');
+  }
+  const inputStore = {
+    get(key) {
+      const file = cachePath(key);
+      if (!fs.existsSync(file)) return null;
+      const data = JSON.parse(fs.readFileSync(file,'utf8'));
+      if (data.key !== key || !['ge','weather','satellite'].every(k=>Array.isArray(data.bundle?.[k]))) {
+        throw Error('Invalid input cache. Rerun with --refresh-inputs.');
+      }
+      console.log('Reusing sampled inputs:', file);
+      return data.bundle;
+    },
+    put(key,bundle) {
+      fs.mkdirSync(cacheDir,{recursive:true});
+      const file=cachePath(key), temp=file+'.'+crypto.randomUUID()+'.tmp';
+      fs.writeFileSync(temp,JSON.stringify({key,bundle}));
+      fs.renameSync(temp,file);
+      console.log('Saved sampled inputs:',file);
+    }
+  };
   const records = [];
   for (const {name} of entries) {
     const {text, files} = core.archiveRead(input, name, zip);
@@ -26,7 +50,7 @@ async function main() {
     const start=tower.daily[0].date, end=tower.daily.at(-1).date;
     console.log(info.site, start, end, tower.daily.length+' days', metadata.latitude, metadata.longitude);
     if (!output) continue;
-    const options = {weatherSource:'TERRACLIMATE', satelliteSource:'MODIS16', timestep:'monthly'};
+    const options = {weatherSource:'TERRACLIMATE', satelliteSource:'MODIS16', timestep:'monthly', inputStore, refreshInputs:refresh==='refresh'};
     const geom = ee.Geometry.Point([metadata.longitude, metadata.latitude]);
     const fc = await new Promise((ok, fail)=>ctx.runForGeometryAsync(geom,start,end,JSON.parse(parameters),options,(v,e)=>e?fail(Error(e)):ok(v)));
     const data = await new Promise((ok,fail)=>fc.evaluate((v,e)=>e?fail(Error(e)):ok(v)));

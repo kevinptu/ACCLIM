@@ -2312,6 +2312,21 @@ function fetchHistoricalVIMinima(geom,start,key,params,request,done) {
   batch();
 }
 
+// Keep up to five input bundles in this app session. The batch runner supplies a disk store.
+var recentInputBundles = [];
+var sessionInputStore = {
+  get:function(key) {
+    for (var i=0;i<recentInputBundles.length;i++) {
+      if (recentInputBundles[i].key===key) return recentInputBundles[i].bundle;
+    }
+    return null;
+  },
+  put:function(key,bundle) {
+    recentInputBundles=recentInputBundles.filter(function(item){return item.key!==key;});
+    recentInputBundles.push({key:key,bundle:bundle});
+    if (recentInputBundles.length>5) recentInputBundles.shift();
+  }
+};
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
   var overrides = params || {};
@@ -2390,12 +2405,22 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     if(lastRecord.period_days)last=carbonDateString(carbonDateMillis(lastRecord.date)+(lastRecord.period_days-1)*86400000);
   }
   var spec=SATELLITE_SOURCES[cfg.satelliteSource||'MODIS16'],pad=spec.gap+32;
+  // Bump the version if sampling, QA, or GE aggregation semantics change.
+  var inputKey=JSON.stringify(['ACCLIM-inputs-v1',geom.serialize(),start,end,first,last,
+    cfg.weatherPlan?'tower':(cfg.weatherSource||'TERRACLIMATE'),cfg.satelliteSource||'MODIS16',cfg.timestep]);
+  var store=cfg.inputStore||sessionInputStore;
+  var saved=cfg.refreshInputs?null:store.get(inputKey);
+  var weatherRows=[],diagnosticRows=null;
+  function alignAndSimulate(rawSatellite) {
+    cfg.alignedSatellite=carbonRowsToFC(alignSatelliteRows(rawSatellite,first,last,cfg.satelliteSource||'MODIS16'));
+    simulate();
+  }
   var cursor=carbonDateMillis(first)-pad*86400000, stop=carbonDateMillis(last)+pad*86400000, sampled=[];
   function satelliteBatch() {
     if(request!==UI._requestId)return;
     if(cursor>stop) {
-      cfg.alignedSatellite=carbonRowsToFC(alignSatelliteRows(sampled,first,last,cfg.satelliteSource||'MODIS16'));
-      simulate();return;
+      if (diagnosticRows!==null) store.put(inputKey,{weather:weatherRows,satellite:sampled,ge:diagnosticRows});
+      alignAndSimulate(sampled);return;
     }
     var next=Math.min(cursor+90*86400000,stop+86400000),a=carbonDateString(cursor),b=carbonDateString(next-86400000);
     setStatus('Sampling satellite reflectance: '+a+' to '+b+'...');
@@ -2404,17 +2429,27 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     });
   }
   function startInputs(){
+  var weatherKey=cfg.weatherSource||'TERRACLIMATE';
+  function useWeather(rows) {
+    cfg.sampledWeather=carbonRowsToFC(aggregateWeatherPeriods(rows,periods,WEATHER_SOURCES[weatherKey].daily?'daily':'monthly'));
+  }
+  if (saved) {
+    setStatus('Reusing weather and satellite inputs for this location...');
+    if (!cfg.weatherPlan) useWeather(saved.weather);
+    alignAndSimulate(saved.satellite);
+    return;
+  }
   if(cfg.weatherPlan)satelliteBatch();
   else {
     setStatus('Sampling selected weather data...');
-    var weatherKey=cfg.weatherSource||'TERRACLIMATE';
     var weatherStart=WEATHER_SOURCES[weatherKey].daily?first:first.slice(0,7)+'-01';
     materialize(sampleWeather(geom,weatherStart,last,weatherKey),function(rows) {
-      cfg.sampledWeather=carbonRowsToFC(aggregateWeatherPeriods(rows,periods,WEATHER_SOURCES[weatherKey].daily?'daily':'monthly'));satelliteBatch();
+      weatherRows=rows;useWeather(rows);satelliteBatch();
     });
   }
   }
-  fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,function(diagnostic,error){
+  function useGE(diagnostic,error){
+    diagnosticRows=error?null:diagnostic;
     if(request!==UI._requestId)return;
     if(error&&(params.fitNDVIminGE||((params.faparMethod==='FGE' || params.faparMethod==='GE_NDVI_MIN' || params.faparMethod==='NDVI_BLEND' || params.fiparMethod==='NDVI_BLEND') && params.fge_exp>0))){done(null,error);return;}
     try{
@@ -2453,7 +2488,9 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
         prepareInputs();
       }
     }catch(error){done(null,error.message);}
-  });
+  }
+  if (saved) useGE(saved.ge);
+  else fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,useGE);
 }
 
 function runForGeometry(geom, startDate, endDate, paramOverrides, config) {
@@ -4154,6 +4191,8 @@ UI.faparSelector = ui.Select({items: [
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+UI.reuseInputs=ui.Checkbox({label:'Reuse sampled weather and satellite inputs',value:true});
+UI.inputPanel.add(UI.reuseInputs);
 UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
 UI.vegetationParameters = {};
 UI.soilMinimumSelectors = {};
@@ -4802,7 +4841,7 @@ function onRun() {
         return;
       }
       try {
-    var runDataConfig={timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
+    var runDataConfig={refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
     runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
