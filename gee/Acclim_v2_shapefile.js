@@ -3034,7 +3034,8 @@ function soilSpectralEstimate(texture) {
   if (!valid || total <= 0) return null;
   var red = (0.26 * sand + 0.32 * silt + 0.26 * clay) / total;
   var nir = (0.37 * sand + 0.42 * silt + 0.33 * clay) / total;
-  return {red: red, nir: nir, ndvi: (nir - red) / (nir + red)};
+  return {red: red, nir: nir, ndvi: (nir - red) / (nir + red),
+    evi2: 2.5 * (nir - red) / (nir + 2.4 * red + 1)};
 }
 
 // User-supplied Relative AWC versus sand (% by mass) plot.
@@ -3384,7 +3385,7 @@ function loadCarbonProductsWithTexture(output, geom, start, end, requestId, regi
       var soil = soilSpectralEstimate(texture);
       addChartNote(ui.Label('Texture-based bare-soil estimate (0–30 cm): ' + (soil ?
         'R (640 nm) = ' + soil.red.toFixed(3) + ', NIR (850 nm) = ' + soil.nir.toFixed(3) +
-        ', NDVImin = ' + soil.ndvi.toFixed(3) : 'unavailable')));
+        ', NDVImin = ' + soil.ndvi.toFixed(3) + ', EVI2min = ' + soil.evi2.toFixed(3) : 'unavailable')));
       if (bucketInfo.FAPAR_method_requested === 'EVI2') {
         addChartNote(ui.Label(bucketInfo.FAPAR_method === 'EVI2'
           ? 'FAPAR = EVI2 scaled between EVI2min=' + bucketInfo.FAPAR_EVI2min.toFixed(3) +
