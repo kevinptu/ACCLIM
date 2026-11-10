@@ -28,7 +28,7 @@ var ACCLIM_PARAMS = {
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
   fMexp:       1,      // Seasonal FAPAR / running seasonal maximum exponent
   FAPARmult: 1,          // Multiplier for the direct FIPAR option
-  faparMethod: 'EVI2',     // Fixed bounds by default; the app resolves bare-soil minima per location
+  faparMethod: 'EVI2',     // Fixed bounds by default; optional SoilGrids minima resolve per location
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
   fitEVI2: false,         // Fit EVI2 bounds against FIPAR; otherwise use fixed bounds
@@ -40,14 +40,14 @@ var ACCLIM_PARAMS = {
   tc_sm:          30,       // humidity-derived soil-moisture running-mean time constant (days)
   tc:             7,        // running-mean time constant (days)
   fDexp_T: 0,             // Canopy transpiration exponent on the existing fD factor
-  fMexp_T: 1,             // Canopy transpiration exponent on the existing fM factor
+  fMexp_T: 0,             // Canopy transpiration exponent on the existing fM factor
   fDexp:          0,      // VPD attenuation exponent (VPDday_mean in kPa)
   GPPmean2GPPmax: 0.67,      // ratio of mean GPP to GPPmax asymptote
   Oi:             20900,    // leaf internal O2 partial pressure (Pa)
   QRC3:           12,       // C3 quantum requirement (mol photons / mol CO2)
   QRC4:           16.67,    // C4 quantum requirement
-  EVI2min:        0.0,     // EVI2 of bare ground
-  EVI2max:        0.5,     // EVI2 of full green canopy
+  EVI2min:        0,     // EVI2 of bare ground
+  EVI2max:        0.6,     // EVI2 of full green canopy
   fresp:          0.1,      // leaf respiration as fraction of GPP capacity
   PT_coef:        1.26,     // Priestley-Taylor coefficient
   rho_air:        1.292,    // air density (kg/m3)
@@ -74,7 +74,7 @@ var ACCLIM_PARAMS = {
   // Intercepted PAR fraction used for water and energy partitioning.
   ndvi_min: 0, // Used unless the GE′=0 NDVImin option is selected.
   ndvi_max: 1,
-  ndvi_exp: 1
+  ndvi_exp: 1.6
 };
 
 var DATASETS = {
@@ -2307,7 +2307,7 @@ function fetchHistoricalVIMinima(geom,start,key,params,request,done) {
 function runForGeometryAsync(geom,start,end,params,config,done) {
   var request=UI._requestId, cfg=mergeParams(config,{});
   var overrides = params || {};
-  var autoNDVI = overrides.ndvi_min == null, autoEVI2 = overrides.EVI2min == null;
+  var autoNDVI = overrides.autoSoilNDVImin === true, autoEVI2 = overrides.autoSoilEVI2min === true;
   params=mergeParams(ACCLIM_PARAMS,overrides);
   if(params.faparMethod==='NDVI_GE_OFFSET')params.fitNDVIminGE=true;
   var gePeriods=[],ndviFit,historicalFit;
@@ -2434,7 +2434,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
           if (request !== UI._requestId) return;
           var soil = !error && texture && soilSpectralEstimate(texture);
           if (!soil) {
-            done(null,'SoilGrids texture unavailable for this location. Enter numerical VI minima to run.');
+            done(null,'SoilGrids texture unavailable for this location. Clear Auto: SoilGrids texture and enter numerical VI minima to run.');
             return;
           }
           if (autoNDVI && !params.fitNDVIminGE) params.ndvi_min = soil.ndvi;
@@ -4148,6 +4148,7 @@ UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
 UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
 UI.vegetationParameters = {};
+UI.soilMinimumSelectors = {};
 [
   {key:'GE_scale', label:'GE_scale'},
   {key:'ndvi_exp', label:'ndvi_exp'},
@@ -4162,18 +4163,25 @@ UI.vegetationParameters = {};
   {key:'ndvi_max', label:'NDVImax'}
 ].forEach(function(parameter) {
   UI.inputPanel.add(ui.Label(parameter.label));
-  var textureDefault = parameter.key === 'EVI2min' || parameter.key === 'ndvi_min';
-  var input = ui.Textbox({value:textureDefault ? '' : String(ACCLIM_PARAMS[parameter.key]),
-    placeholder:textureDefault ? 'Auto: SoilGrids texture (or enter a value)' : '', style:{stretch:'horizontal'}});
+  var input = ui.Textbox({value:String(ACCLIM_PARAMS[parameter.key]), style:{stretch:'horizontal'}});
   UI.vegetationParameters[parameter.key] = input;
   UI.inputPanel.add(input);
+  if (parameter.key === 'EVI2min' || parameter.key === 'ndvi_min') {
+    var auto = ui.Checkbox({label:'Auto: SoilGrids texture', value:false,
+      onChange:function(selected) { input.setDisabled(selected); }});
+    UI.soilMinimumSelectors[parameter.key] = auto;
+    UI.inputPanel.add(auto);
+  }
 });
 UI.inputPanel.add(ui.Label('Fitted/percentile methods estimate their bounds for each run. The fixed-maximum experiment uses EVI2max = 0.6.'));
 function readVegetationParameters() {
   var values = {};
   Object.keys(UI.vegetationParameters).forEach(function(key) {
     var text = UI.vegetationParameters[key].getValue().trim();
-    if (!text && (key === 'ndvi_min' || key === 'EVI2min')) return;
+    if (UI.soilMinimumSelectors[key] && UI.soilMinimumSelectors[key].getValue()) {
+      values[key === 'ndvi_min' ? 'autoSoilNDVImin' : 'autoSoilEVI2min'] = true;
+      return;
+    }
     var value = Number(text);
     if (!text || !isFinite(value)) throw new Error(key + ' must be a finite number.');
     values[key] = value;
