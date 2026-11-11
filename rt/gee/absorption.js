@@ -1,5 +1,5 @@
 function rtAbsorptionMethod(method) {
-  return method === 'RT_CHL' || method === 'RT_LEAF';
+  return method === 'RT_CHL' || method === 'RT_LEAF' || rtAbsIndex(method)!==null;
 }
 // Collapse the library to the fitted LAI histogram and red background once per date.
 function rtAbsorptionResponse(histogram, background) {
@@ -74,4 +74,42 @@ function rtAbsorptionPeriods(obs, periods, latitude, sky, radiation) {
     output[period.date]=row;
   });
   return output;
+}
+
+function rtAbsIndex(method) {
+  if(method==='RT_CHL_NDVI')return 'ndvi';
+  if(method==='RT_CHL_EVI2')return 'evi2';
+  return null;
+}
+// Pixels sharing LAI have identical modeled absorption on a given date.
+// Store sufficient statistics so changing the diffuse fraction needs no new retrieval.
+function rtIndexBins(pixels,covers) {
+  var bins={};
+  pixels.forEach(function(p,i){
+    if(p.red+p.nir<=0)return;
+    var lai=Math.round(-20*Math.log(1-covers[i]));
+    var bin=bins[lai] || (bins[lai]={n:0,ndvi:0,ndvi_sq:0,evi2:0,evi2_sq:0});
+    var ndvi=(p.nir-p.red)/(p.nir+p.red);
+    var evi2=Math.max(0,Math.min(1,2.5*(p.nir-p.red)/(1+p.nir+2.4*p.red)));
+    bin.n++;bin.ndvi+=ndvi;bin.ndvi_sq+=ndvi*ndvi;bin.evi2+=evi2;bin.evi2_sq+=evi2*evi2;
+  });
+  return bins;
+}
+function rtFitAbsorptionLine(obs,first,last,sky,index) {
+  var moments=[];
+  obs.forEach(function(day){
+    if(day.millis<first || day.millis>last)return;
+    var sx=0,sy=0,sxx=0,sxy=0,n=0;
+    Object.keys(day.index_bins).forEach(function(lai){
+      var hist=[];
+      hist[Number(lai)]=1;
+      var response=rtAbsorptionResponse(hist,day.background_red);
+      var terms=rtDayAbsorption(response,day.latitude,day.millis);
+      if(!terms)return;
+      var y=(1-sky)*terms[1]+sky*terms[3], bin=day.index_bins[lai];
+      n+=bin.n;sx+=bin[index];sxx+=bin[index+'_sq'];sy+=bin.n*y;sxy+=bin[index]*y;
+    });
+    if(n)moments.push({x:sx/n,y:sy/n,xx:sxx/n,xy:sxy/n,n:n});
+  });
+  return rtEqualDateLine(moments);
 }

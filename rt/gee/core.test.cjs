@@ -90,3 +90,25 @@ const week=context.rtAbsorptionPeriods(observations,[aggregate],38.43,.5,radiati
 assert(Math.abs(week.FAPAR_chl-(150*daily['1'].FAPAR_chl+250*daily['2'].FAPAR_chl)/450)<1e-12);
 assert.equal(context.rtAbsorptionPeriods(observations,[aggregate],38.43,1,{}).week.FAPAR_leaf,undefined);
 console.log('PASS FourSAIL spectral absorption, bare ground, bracketed interpolation and photon-weighted aggregation.');
+
+// Compare the compressed per-LAI fit with explicit pixel-by-pixel weighted least squares.
+for(const index of ['ndvi','evi2']){
+  const paired=[];
+  const scenes=[[[.1,.2,1],[.1,.4,12],[.2,.2,1]],[[.03,.26,18],[.08,.31,12]]].map((scene,t)=>{
+    const pixels=scene.map(([red,nir])=>({red,nir}));
+    const covers=scene.map(([,,lai])=>1-Math.exp(-.05*lai));
+    for(const [r,n,lai] of scene){
+      const h=Array(81).fill(0);h[lai]=1;
+      const v=context.rtDayAbsorption(context.rtAbsorptionResponse(h,.19),38,first+t*day);
+      paired.push({x:index==='ndvi'?(n-r)/(n+r):2.5*(n-r)/(1+n+2.4*r),
+        y:.7*v[1]+.3*v[3],w:1/scene.length});
+    }
+    return {millis:first+t*day,latitude:38,background_red:.19,index_bins:context.rtIndexBins(pixels,covers)};
+  });
+  const xbar=paired.reduce((s,p)=>s+p.w*p.x,0)/2,ybar=paired.reduce((s,p)=>s+p.w*p.y,0)/2;
+  const m=paired.reduce((s,p)=>s+p.w*(p.x-xbar)*(p.y-ybar),0)/paired.reduce((s,p)=>s+p.w*(p.x-xbar)**2,0);
+  const fit=context.rtFitAbsorptionLine(scenes,first,first+day,.3,index);
+  assert(Math.abs(fit.slope-m)<1e-12 && Math.abs(fit.intercept-(ybar-m*xbar))<1e-12);
+  assert.equal(fit.pixels,5);assert.equal(fit.dates,2);
+}
+console.log('PASS date-weighted pixel regressions for chlorophyll absorption against NDVI and EVI2.');
