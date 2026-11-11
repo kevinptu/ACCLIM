@@ -26,8 +26,8 @@ var ACCLIM_PARAMS = {
   fge_exp: 1,             // Raw GE / GE_scale exponent; zero disables it
   fitVIMinP05: false,     // Optional ten-year observed fifth-percentile baseline
   fitNDVIminGE: false,     // Optional FAPAR menu experiment; configured NDVImin by default
-  fMgpp_exp: 1,  // GPP seasonal FAPAR response
-  FAPARmult: 1,          // Multiplier for the direct FIPAR option
+  fMgpp_exp: 0,  // GPP seasonal FAPAR response
+  FAPARmult: 0.8,          // Multiplier for the direct FIPAR option
   faparMethod: 'EVI2',     // Fixed bounds by default; optional SoilGrids minima resolve per location
   fitEVI2maxFixed: false, // Experiment: fit only the lower endpoint; fix upper at 0.6
   useSharedFPAR: false,   // Use photosynthetic FAPAR for water and energy partitioning too
@@ -4799,7 +4799,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = scaled EVI2 (fixed bounds, EVI2exp)', value: 'EVI2_FIXED_POWER'}], value: 'EVI2_FIXED_POWER',
+  {label: 'FAPAR = scaled EVI2 (fixed bounds, EVI2exp)', value: 'EVI2_FIXED_POWER'}], value: 'FIPAR',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
@@ -4868,7 +4868,7 @@ UI.fiparSelector = ui.Select({
     {label: 'FIPAR = scaled NDVI', value: 'NDVI'},
     {label: 'FIPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'}
   ],
-  value: 'NDVI',
+  value: 'RT_NDVI',
   style: {stretch: 'horizontal'}
 });
 UI.inputPanel.add(UI.fiparSelector);
