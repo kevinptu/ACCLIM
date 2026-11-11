@@ -1119,6 +1119,8 @@ function computeInitialState(forcingList, params) {
 
 // FIPAR is independent of the selected photosynthetic FAPAR method.
 function computeFIPAR(ndvi, p, ge) {
+  // Site calibration: FIPAR = clamp01(m_cover * NDVI + b_cover).
+  if (p.fiparMethod === 'RT_NDVI') return ee.Number(ndvi).multiply(p.m_cover).add(p.b_cover).max(0).min(1);
   if (p.fiparMethod === 'NDVI_BLEND') {
     var n = ee.Number(ndvi).max(0);
     var fge = greenExcessMultiplier(ge, p);
@@ -2530,12 +2532,12 @@ var RT = (function () {
         near_backgrounds: near.length, pixels: pixels.length, geometries: keys.length,
         profile: profile, records: records};
     }
-    function bestMedianCover() {
+    function bestCovers() {
       var best = 0;
       for (var s = 1; s < costs.length; s++) if (costs[s] < costs[best]) best = s;
-      return median(choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); }));
+      return choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); });
     }
-    return {step: step, finish: finish, bestMedianCover: bestMedianCover, geometries: keys.length};
+    return {step: step, finish: finish, bestCovers: bestCovers, geometries: keys.length};
   }
   return {createFit: createFit, valid: valid, geometry: geometry, spectrum: spectrum, median: median};
 }());
@@ -2868,7 +2870,9 @@ function fetchRTCover(geom,start,end,km,request,done) {
               if(request!==UI._requestId)return;
               try {
                 if(!fit.step()){ui.util.setTimeout(advance,0);return;}
-                observations.push({millis:carbonDateMillis(date),cover:fit.bestMedianCover()});
+                var covers=fit.bestCovers();
+                observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
+                  calibration:rtDayMoments(groups[date],covers)});
                 nextDay();
               } catch(e){done(null,e.message);}
             }
@@ -2880,6 +2884,30 @@ function fetchRTCover(geom,start,end,km,request,done) {
       nextImage();
     });
   });
+}
+
+// Equal total weight for each acquisition date. Keep within-date pixel covariance.
+function rtDayMoments(pixels,covers) {
+  var sx=0, sy=0, sxx=0, sxy=0, n=0;
+  pixels.forEach(function(p,i) {
+    var sum=p.red+p.nir;
+    if(sum<=0)return;
+    var x=(p.nir-p.red)/sum, y=covers[i];
+    sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; n++;
+  });
+  return n ? {x:sx/n,y:sy/n,xx:sxx/n,xy:sxy/n,n:n} : null;
+}
+function rtFitCoverLine(obs,first,last) {
+  var sx=0, sy=0, sxx=0, sxy=0, dates=0, pixels=0;
+  obs.forEach(function(day) {
+    var d=day.calibration;
+    if(!d || day.millis<first || day.millis>last)return;
+    sx+=d.x; sy+=d.y; sxx+=d.xx; sxy+=d.xy; pixels+=d.n; dates++;
+  });
+  var variance=dates ? sxx/dates-Math.pow(sx/dates,2) : 0;
+  if(variance<=1e-12)return null;
+  var slope=(sxy/dates-(sx/dates)*(sy/dates))/variance;
+  return {m_cover:slope,b_cover:(sy-slope*sx)/dates,cover_fit_dates:dates,cover_fit_pixels:pixels};
 }
 
 // END ACCLIM-RT RETRIEVAL
@@ -2898,6 +2926,10 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     var enriched=rows.map(function(r){var d=mergeParams(r,byDate[r.date]||{GE:null,EVI2_GE:null,NDVI_GE:null,GE_available_pct:0});
       d.evi2_min_ge=eviFit?eviFit.intercept:null;d.ndvi_min_ge=ndviDiagnosticFit?ndviDiagnosticFit.intercept:null;
       d.NIRv=carbonFinite(d.nir)&&carbonFinite(d.NDVI)?d.nir*d.NDVI:null;
+      if(params.fiparMethod==='RT_NDVI') {
+        d.m_cover=params.m_cover; d.b_cover=params.b_cover;
+        d.cover_fit_dates=params.cover_fit_dates; d.cover_fit_pixels=params.cover_fit_pixels;
+      }
       d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
@@ -3049,16 +3081,22 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     if (saved) useGE(saved.ge);
     else fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,useGE);
   }
-  if(params.faparMethod==='PROSAIL' || params.fiparMethod==='PROSAIL') {
+  if(params.faparMethod==='PROSAIL' || params.fiparMethod==='PROSAIL' || params.fiparMethod==='RT_NDVI') {
     var km=cfg.rtBoxKm===undefined?10:cfg.rtBoxKm;
     if(!isFinite(km)||km<=0){done(null,'Enter a positive PROSAIL box side in km.');return;}
-    var rtKey=JSON.stringify(['RT-MYD09A1-v1',geom.serialize(),km,start,end]);
+    var rtKey=JSON.stringify(['RT-MYD09A1-v2',geom.serialize(),km,start,end]);
     function useCover(obs,error) {
       if(request!==UI._requestId)return;
       if(error){done(null,error);return;}
       if(!obs.length){done(null,'No PROSAIL fcover fits for the selected area and date range.');return;}
       store.put(rtKey,obs);
-      cfg.rtPeriods=ee.Dictionary(rtCoverPeriods(obs,periods,SATELLITE_SOURCES.MODIS8.gap));
+      if(params.fiparMethod==='RT_NDVI') {
+        var line=rtFitCoverLine(obs,carbonDateMillis(start),carbonDateMillis(end));
+        if(!line){done(null,'PROSAIL calibration needs matched pixels with varying NDVI inside the selected dates.');return;}
+        params=mergeParams(params,line);
+      }
+      if(params.faparMethod==='PROSAIL' || params.fiparMethod==='PROSAIL')
+        cfg.rtPeriods=ee.Dictionary(rtCoverPeriods(obs,periods,SATELLITE_SOURCES.MODIS8.gap));
       startModelInputs();
     }
     var cachedCover=cfg.refreshInputs?null:store.get(rtKey);
@@ -4825,6 +4863,7 @@ UI.inputPanel.add(UI.sharedFPAR);
 UI.inputPanel.add(ui.Label('FIPAR method (before optional shared FAPAR override)'));
 UI.fiparSelector = ui.Select({
   items: [
+    {label: 'FIPAR = m_cover × NDVI + b_cover (PROSAIL fit)', value: 'RT_NDVI'},
     {label: 'FIPAR = PROSAIL fcover', value: 'PROSAIL'},
     {label: 'FIPAR = scaled NDVI', value: 'NDVI'},
     {label: 'FIPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'}
@@ -4838,7 +4877,7 @@ UI.rtBoxPanel=ui.Panel([ui.Label('PROSAIL box side (km), Aqua MODIS 8-day'),UI.r
 UI.inputPanel.add(UI.rtBoxPanel);
 UI.inputPanel.add(ui.Button('PROSAIL retrieval diagnostics', rtApp));
 function updateRTOptions() {
-  var rtWater=UI.fiparSelector.getValue()==='PROSAIL';
+  var rtWater=['PROSAIL','RT_NDVI'].indexOf(UI.fiparSelector.getValue())>=0;
   if(rtWater)UI.sharedFPAR.setValue(false,false);
   UI.sharedFPAR.setDisabled(rtWater);
   UI.rtBoxPanel.style().set('shown',rtWater||UI.faparSelector.getValue()==='PROSAIL');

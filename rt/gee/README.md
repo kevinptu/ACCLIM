@@ -38,6 +38,10 @@ For a selected PROSAIL fraction the model uses the date-specific spatial median 
 Daily cover uses linear interpolation between bracketing acquisitions up to 32 days apart. The retrieval includes 32 days on either side of the request for bracketing. Weekly periods take the mean with complete daily coverage. Monthly periods take the median of available daily estimates. rt_observed_days, rt_interpolated_days and rt_missing_pct describe coverage. Periods without sufficient coverage have unavailable physiology. Repeated experiments can reuse the same fitted dates through the existing input cache.
 
 
+The FIPAR menu also offers **FIPAR = m_cover × NDVI + b_cover (PROSAIL fit)**. The model fits pixel fcover against NDVI from the same screened Aqua red/NIR observation within the selected box and dates. Ordinary least squares gives each acquisition date equal total weight. Observations outside the run dates serve only the direct-cover interpolation. A zero red-plus-NIR denominator excludes the pixel from calibration. The fit requires variation in NDVI and follows the same four-pixel minimum per acquisition as the RT retrieval.
+
+The model applies the fitted slope and intercept to its selected satellite product's timestep NDVI and clips the result to [0, 1]. When a different sensor supplies the model NDVI, this transfers the Aqua calibration to that sensor. The model rows carry m_cover, b_cover, cover_fit_dates, and cover_fit_pixels.
+
 ## Build and verification
 
 Use the same prosail 2.0.5 environment as the Python reference:

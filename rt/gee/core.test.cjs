@@ -55,4 +55,14 @@ assert.equal(period('weekly',3).rt_interpolated_days,1);
 assert(Math.abs(period('weekly',3).rt_fcover-.3)<1e-12);
 assert.equal(period('weekly',7).rt_fcover,undefined);
 assert.equal(period('monthly',31).rt_fcover,.3);
-assert.equal(fit.bestMedianCover(), result.fcover);
+assert.equal(RT.median(fit.bestCovers()), result.fcover);
+
+const lineDays=[{millis:0,calibration:context.rtDayMoments([{red:1,nir:1},{red:0,nir:1}],[0,1])},
+  {millis:1,calibration:context.rtDayMoments([{red:1,nir:1}],[1])},
+  {millis:2,calibration:null}];
+const line=context.rtFitCoverLine(lineDays,0,1);
+assert(Math.abs(line.m_cover-1/3)<1e-12);
+assert(Math.abs(line.b_cover-2/3)<1e-12);
+assert.equal(line.cover_fit_pixels,3);
+assert.equal(context.rtFitCoverLine(lineDays,1,2),null);
+assert.equal(context.rtFitCoverLine(lineDays,0,0).m_cover,1);

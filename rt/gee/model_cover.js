@@ -55,7 +55,9 @@ function fetchRTCover(geom,start,end,km,request,done) {
               if(request!==UI._requestId)return;
               try {
                 if(!fit.step()){ui.util.setTimeout(advance,0);return;}
-                observations.push({millis:carbonDateMillis(date),cover:fit.bestMedianCover()});
+                var covers=fit.bestCovers();
+                observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
+                  calibration:rtDayMoments(groups[date],covers)});
                 nextDay();
               } catch(e){done(null,e.message);}
             }
@@ -67,4 +69,28 @@ function fetchRTCover(geom,start,end,km,request,done) {
       nextImage();
     });
   });
+}
+
+// Equal total weight for each acquisition date. Keep within-date pixel covariance.
+function rtDayMoments(pixels,covers) {
+  var sx=0, sy=0, sxx=0, sxy=0, n=0;
+  pixels.forEach(function(p,i) {
+    var sum=p.red+p.nir;
+    if(sum<=0)return;
+    var x=(p.nir-p.red)/sum, y=covers[i];
+    sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; n++;
+  });
+  return n ? {x:sx/n,y:sy/n,xx:sxx/n,xy:sxy/n,n:n} : null;
+}
+function rtFitCoverLine(obs,first,last) {
+  var sx=0, sy=0, sxx=0, sxy=0, dates=0, pixels=0;
+  obs.forEach(function(day) {
+    var d=day.calibration;
+    if(!d || day.millis<first || day.millis>last)return;
+    sx+=d.x; sy+=d.y; sxx+=d.xx; sxy+=d.xy; pixels+=d.n; dates++;
+  });
+  var variance=dates ? sxx/dates-Math.pow(sx/dates,2) : 0;
+  if(variance<=1e-12)return null;
+  var slope=(sxy/dates-(sx/dates)*(sy/dates))/variance;
+  return {m_cover:slope,b_cover:(sy-slope*sx)/dates,cover_fit_dates:dates,cover_fit_pixels:pixels};
 }
