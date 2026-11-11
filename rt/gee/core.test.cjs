@@ -57,15 +57,18 @@ assert.equal(period('weekly',7).rt_fcover,undefined);
 assert.equal(period('monthly',31).rt_fcover,.3);
 assert.equal(RT.median(fit.bestCovers()), result.fcover);
 
-const lineDays=[{millis:0,calibration:context.rtDayMoments([{red:1,nir:1},{red:0,nir:1}],[0,1])},
-  {millis:1,calibration:context.rtDayMoments([{red:1,nir:1}],[1])},
-  {millis:2,calibration:null}];
-const line=context.rtFitCoverLine(lineDays,0,1);
-assert(Math.abs(line.m_cover-1/3)<1e-12);
-assert(Math.abs(line.b_cover-2/3)<1e-12);
-assert.equal(line.cover_fit_pixels,3);
-assert.equal(context.rtFitCoverLine(lineDays,1,2),null);
-assert.equal(context.rtFitCoverLine(lineDays,0,0).m_cover,1);
+const moments=[{x:.5,y:.5,xx:.5,xy:.5,n:2},{x:0,y:1,xx:0,xy:0,n:1}];
+const line=context.rtEqualDateLine(moments);
+assert(Math.abs(line.slope-1/3)<1e-12);
+assert(Math.abs(line.intercept-2/3)<1e-12);
+assert.equal(context.rtEqualDateLine(moments.slice(1)),null);
+assert.equal(context.rtDayInterception(1,[1],0),1-Math.exp(-.5));
+assert.equal(context.rtDayInterception(1,[.5],0),1-Math.exp(-1));
+assert.equal(context.rtDayInterception(0,[.5],.5),0);
+assert.equal(context.rtDayInterception(1,null,.5),null);
+let skyRef=0;
+for(let i=0;i<10000;i++){const mu=(i+.5)/10000;skyRef+=2*mu*(1-Math.exp(-.5/mu))/10000;}
+assert(Math.abs(context.rtDayInterception(1,[.5],1)-skyRef)<1e-4);
 
 // Match independently evaluated spectral FourSAIL fluxes for LAI 1.3, mu .55, flat background .2.
 const hist = Array(81).fill(0); hist[13]=4;
@@ -107,7 +110,7 @@ for(const index of ['ndvi','evi2']){
   });
   const xbar=paired.reduce((s,p)=>s+p.w*p.x,0)/2,ybar=paired.reduce((s,p)=>s+p.w*p.y,0)/2;
   const m=paired.reduce((s,p)=>s+p.w*(p.x-xbar)*(p.y-ybar),0)/paired.reduce((s,p)=>s+p.w*(p.x-xbar)**2,0);
-  const fit=context.rtFitAbsorptionLine(scenes,first,first+day,.3,index);
+  const fit=context.rtFitDaylightLine(scenes,first,first+day,.3,index);
   assert(Math.abs(fit.slope-m)<1e-12 && Math.abs(fit.intercept-(ybar-m*xbar))<1e-12);
   assert.equal(fit.pixels,5);assert.equal(fit.dates,2);
 }

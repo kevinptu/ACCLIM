@@ -59,8 +59,7 @@ function fetchRTCover(geom,start,end,km,request,done) {
                 var histogram=Array.apply(null,Array(81)).map(function(){return 0;});
                 covers.forEach(function(c){histogram[Math.round(-20*Math.log(1-c))]++;});
                 observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
-                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1],
-                  calibration:rtDayMoments(groups[date],covers)});
+                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1]});
                 nextDay();
               } catch(e){done(null,e.message);}
             }
@@ -75,21 +74,6 @@ function fetchRTCover(geom,start,end,km,request,done) {
 }
 
 // Equal total weight for each acquisition date. Keep within-date pixel covariance.
-function rtDayMoments(pixels,covers) {
-  var sx=0, sy=0, sxx=0, sxy=0, n=0;
-  pixels.forEach(function(p,i) {
-    var sum=p.red+p.nir;
-    if(sum<=0)return;
-    var x=(p.nir-p.red)/sum, y=covers[i];
-    sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; n++;
-  });
-  return n ? {x:sx/n,y:sy/n,xx:sxx/n,xy:sxy/n,n:n} : null;
-}
-function rtFitCoverLine(obs,first,last) {
-  var days=obs.filter(function(d){return d.calibration && d.millis>=first && d.millis<=last;});
-  var fit=rtEqualDateLine(days.map(function(d){return d.calibration;}));
-  return fit ? {m_cover:fit.slope,b_cover:fit.intercept,cover_fit_dates:fit.dates,cover_fit_pixels:fit.pixels} : null;
-}
 function rtEqualDateLine(moments) {
   var sx=0, sy=0, sxx=0, sxy=0, dates=moments.length, pixels=0;
   moments.forEach(function(d){

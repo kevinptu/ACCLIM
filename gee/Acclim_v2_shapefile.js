@@ -823,7 +823,7 @@ function assembleSelectedForcing(geom,start,end,config) {
     }).reduce(ee.Reducer.mean()));
     var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(usableSatellite).and(dl.gt(0));
     if(p.faparMethod==='RT_CHL'||p.faparMethod==='RT_LEAF') complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('FAPAR_leaf'),1,0)));
-    if(p.faparMethod==='PROSAIL' || p.fiparMethod==='PROSAIL') complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('rt_fcover'),1,0)));
+    if(p.faparMethod==='PROSAIL' || p.fiparMethod==='PROSAIL') complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('rt_fipar_daylight'),1,0)));
     if(p.fiparMethod==='NDVI_BLEND' && p.fge_exp>0)complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('GE'),1,0)));
     if(config.weatherPlan)complete=complete.and(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(wf.get('tower_weather_valid'),null),0,wf.get('tower_weather_valid'))).eq(1));
     return f.setGeometry(geom).set(wf.toDictionary()).set(props).set({
@@ -846,7 +846,7 @@ function assembleSelectedForcing(geom,start,end,config) {
   var ready=raw.filter(ee.Filter.eq('model_valid',1)).map(function(f) {
     var tday=f.getNumber('Tmax').multiply(0.75).add(f.getNumber('Tmin').multiply(0.25));
     var ea=f.getNumber('ea'), albedo=f.getNumber('red').add(f.getNumber('nir')).divide(2).max(0).min(1);
-    var fipar=p.fiparMethod==='PROSAIL' ? f.getNumber('rt_fcover') : computeFIPAR(f.getNumber('NDVI'),p,f.get('GE'));
+    var fipar=p.fiparMethod==='PROSAIL' ? f.getNumber('rt_fipar_daylight') : computeFIPAR(f.getNumber('NDVI'),p,f.get('GE'));
     var em=fipar.multiply(p.em_v).add(ee.Number(1).subtract(fipar).multiply(p.em_nv));
     var kelvin=f.getNumber('Tdaily').add(273.15);
     var rn=ee.Number(1).subtract(albedo).multiply(f.getNumber('SWRdaily')).add(kelvin.pow(4).multiply(p.sb)
@@ -1164,7 +1164,7 @@ function photosyntheticFAPAR(instant, p) {
   if (p.faparMethod === 'RT_CHL_EVI2') return ee.Number(instant.get('EVI2')).multiply(p.m_abs_evi2).add(p.b_abs_evi2).max(0).min(1);
   if (p.faparMethod === 'RT_CHL') return ee.Number(instant.get('FAPAR_chl'));
   if (p.faparMethod === 'RT_LEAF') return ee.Number(instant.get('FAPAR_leaf'));
-  if (p.faparMethod === 'PROSAIL') return ee.Number(instant.get('rt_fcover'));
+  if (p.faparMethod === 'PROSAIL') return ee.Number(instant.get('rt_fipar_daylight'));
   // NIRV: NIRv = NIR * NDVI; B = max(0, NIRv); FAPAR = B^fexp.
   if (p.faparMethod === 'NIRV') {
     return ee.Number(instant.get('nir')).multiply(ee.Number(instant.get('NDVI'))).max(0).pow(p.fexp);
@@ -1570,7 +1570,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
-  var instant = ee.Dictionary({FAPAR_leaf:f.get('FAPAR_leaf'),FAPAR_chl:f.get('FAPAR_chl'),rt_fcover:f.get('rt_fcover'), EVI2: EVI2, NDVI: NDVI, red:f.get('red'),nir:f.get('nir'),FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
+  var instant = ee.Dictionary({FAPAR_leaf:f.get('FAPAR_leaf'),FAPAR_chl:f.get('FAPAR_chl'),rt_fipar_daylight:f.get('rt_fipar_daylight'), EVI2: EVI2, NDVI: NDVI, red:f.get('red'),nir:f.get('nir'),FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
@@ -2015,7 +2015,7 @@ function fitEVI2FAPAR(forcingFC, params) {
   var p = mergeParams(ACCLIM_PARAMS, params || {});
   var pairs = forcingFC.filter(ee.Filter.notNull(['NDVI', 'EVI2']))
     .filter(ee.Filter.gte('NDVI', -1)).filter(ee.Filter.lte('NDVI', 1))
-    .map(function(f) { return f.set('FIPAR_fit_target', p.fiparMethod==='PROSAIL' ? f.getNumber('rt_fcover') : computeFIPAR(f.getNumber('NDVI'), p,f.get('GE'))); });
+    .map(function(f) { return f.set('FIPAR_fit_target', p.fiparMethod==='PROSAIL' ? f.getNumber('rt_fipar_daylight') : computeFIPAR(f.getNumber('NDVI'), p,f.get('GE'))); });
   var fit = ee.Dictionary(pairs.reduceColumns(ee.Reducer.linearFit(), ['EVI2', 'FIPAR_fit_target']));
   var a = ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(fit.get('offset'), null), 0, fit.get('offset')));
   var b = ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(fit.get('scale'), null), 0, fit.get('scale')));
@@ -2120,7 +2120,7 @@ function finishACCLIM(baseline, params) {
         'precipitation_missing_pct','satellite_source','satellite_scale_m','satellite_missing_pct','satellite_unavailable_pct','satellite_unobserved_pct','satellite_valid_days','satellite_aggregation','satellite_status',
         'satellite_date_basis','satellite_gap_days','satellite_left_date','satellite_right_date','satellite_max_gap_days',
         'Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily','NDVI','EVI2','red','nir','GE','GE_available_pct',
-        'FAPAR_leaf','FAPAR_chl','rt_diffuse_par_fraction','rt_abs_observed_days','rt_abs_interpolated_days','rt_abs_missing_pct','rt_fcover','rt_observed_days','rt_interpolated_days','rt_missing_pct','precip','precip_units','fSM_mean','fSM_et_mean']);
+        'FAPAR_leaf','FAPAR_chl','rt_diffuse_par_fraction','rt_abs_observed_days','rt_abs_interpolated_days','rt_abs_missing_pct','rt_fipar_daylight','rt_fcover','rt_observed_days','rt_interpolated_days','rt_missing_pct','precip','precip_units','fSM_mean','fSM_et_mean']);
     return ee.Feature(f.geometry(),f.toDictionary(keep));
   });
   return bucketOutput.filter(ee.Filter.notNull(['PredGPPmean'])).map(function(f) {
@@ -2379,15 +2379,22 @@ function rtAbsorptionResponse(histogram, background) {
   return values;
 }
 // Integrate with midpoint quadrature over the sunlit half-day (symmetric about noon).
-function rtDayAbsorption(response, latitude, millis) {
+function rtSunCosines(latitude, millis) {
   var day=1+(millis-Date.UTC(new Date(millis).getUTCFullYear(),0,1))/86400000;
   var dec=.409*Math.sin(2*Math.PI*day/365-1.39), lat=latitude*Math.PI/180;
   var a=Math.sin(lat)*Math.sin(dec), b=Math.cos(lat)*Math.cos(dec);
   var sunset=Math.acos(Math.max(-1,Math.min(1,-a/Math.max(1e-12,b))));
   if (!sunset) return null;
+  var points=[];
+  for(var i=0;i<16;i++) points.push(Math.max(0,a+b*Math.cos(sunset*(i+.5)/16)));
+  return points;
+}
+function rtDayAbsorption(response, latitude, millis) {
+  var points=rtSunCosines(latitude,millis);
+  if(!points)return null;
   var grid=RT_PAR.mu, result=[0,0,response[2*grid.length],response[2*grid.length+1]], sum=0;
-  for(var i=0;i<16;i++) {
-    var mu=Math.max(0,a+b*Math.cos(sunset*(i+.5)/16)), h=1;
+  for(var i=0;i<points.length;i++) {
+    var mu=points[i],h=1;
     while(h<grid.length-1 && grid[h]<mu)h++;
     var w=Math.max(0,Math.min(1,(mu-grid[h-1])/(grid[h]-grid[h-1])));
     for(var c=0;c<2;c++) result[c]+=mu*((1-w)*response[2*(h-1)+c]+w*response[2*h+c]);
@@ -2397,13 +2404,42 @@ function rtDayAbsorption(response, latitude, millis) {
   result[0]/=sum; result[1]/=sum;
   return result;
 }
+// Spherical, randomly distributed foliage: a ray at zenith cosine mu sees LAI/mu.
+function rtDayInterception(lai,points,sky) {
+  if(!points)return null;
+  if(lai===0)return 0;
+  function intercepted(mu){return 1-Math.exp(-.5*lai/mu);}
+  var beam=0, light=0, diffuse=0;
+  for(var i=0;i<points.length;i++){
+    beam+=points[i]*intercepted(points[i]);light+=points[i];
+  }
+  // Isotropic sky incident on a horizontal surface: integral of 2*mu*f(mu) dmu.
+  for(var j=0;j<64;j++){
+    var mu=(j+.5)/64;
+    diffuse+=2*mu*intercepted(mu)/64;
+  }
+  return light ? (1-sky)*beam/light+sky*diffuse : null;
+}
+// Keep the direct-cover option's spatial median, including its even-pixel convention.
+function rtCentralLAIs(histogram) {
+  var count=histogram.reduce(function(a,b){return a+b;},0);
+  var ranks=[Math.floor((count-1)/2),Math.floor(count/2)];
+  return ranks.map(function(rank){
+    for(var i=0;i<histogram.length;i++){rank-=histogram[i]||0;if(rank<0)return i/10;}
+    throw new Error('Empty RT canopy histogram.');
+  });
+}
+function rtMedianInterception(pair,points,sky) {
+  return (rtDayInterception(pair[0],points,sky)+rtDayInterception(pair[1],points,sky))/2;
+}
 // Interpolate responses at common illumination before applying each day's solar geometry.
 function rtAbsorptionPeriods(obs, periods, latitude, sky, radiation) {
   var sorted=obs.slice().sort(function(a,b){return a.millis-b.millis;});
+  var central=sorted.map(function(d){return rtCentralLAIs(d.lai_histogram);});
   var curves=sorted.map(function(d){return rtAbsorptionResponse(d.lai_histogram,d.background_red);});
   var j=0, output={};
   periods.forEach(function(period){
-    var totals=[0,0,0,0], energy=0, observed=0, filled=0;
+    var totals=[0,0,0,0], energy=0, intercepted=0, observed=0, filled=0;
     for(var t=period.millis;t<period.period_end_millis;t+=86400000){
       while(j<sorted.length && sorted[j].millis<t)j++;
       var exact=j<sorted.length && sorted[j].millis===t;
@@ -2418,12 +2454,17 @@ function rtAbsorptionPeriods(obs, periods, latitude, sky, radiation) {
       if(exact)observed++;else filled++;
       if(!day)continue;
       for(var k=0;k<4;k++)totals[k]+=q*day[k];
+      var points=rtSunCosines(latitude,t);
+      var value=rtMedianInterception(central[j],points,sky);
+      if(!exact)value=w*value+(1-w)*rtMedianInterception(central[j-1],points,sky);
+      intercepted+=q*value;
       energy+=q;
     }
     var row={rt_abs_observed_days:observed,rt_abs_interpolated_days:filled,
       rt_abs_missing_pct:100*(1-(observed+filled)/period.period_days),rt_diffuse_par_fraction:sky};
     if(energy>0 && (period.model_cadence==='monthly'||observed+filled===period.period_days)){
       var v=totals.map(function(n){return n/energy;});
+      row.rt_fipar_daylight=intercepted/energy;
       row.rt_leaf_direct=v[0];row.rt_chl_direct=v[1];row.rt_leaf_diffuse=v[2];row.rt_chl_diffuse=v[3];
       row.FAPAR_leaf=(1-sky)*v[0]+sky*v[2];row.FAPAR_chl=(1-sky)*v[1]+sky*v[3];
     }
@@ -2451,18 +2492,23 @@ function rtIndexBins(pixels,covers) {
   });
   return bins;
 }
-function rtFitAbsorptionLine(obs,first,last,sky,index) {
+function rtFitDaylightLine(obs,first,last,sky,index,interception) {
   var moments=[];
   obs.forEach(function(day){
     if(day.millis<first || day.millis>last)return;
+    var points=rtSunCosines(day.latitude,day.millis);
+    if(!points)return;
     var sx=0,sy=0,sxx=0,sxy=0,n=0;
     Object.keys(day.index_bins).forEach(function(lai){
-      var hist=[];
-      hist[Number(lai)]=1;
-      var response=rtAbsorptionResponse(hist,day.background_red);
-      var terms=rtDayAbsorption(response,day.latitude,day.millis);
-      if(!terms)return;
-      var y=(1-sky)*terms[1]+sky*terms[3], bin=day.index_bins[lai];
+      var bin=day.index_bins[lai], y;
+      if(interception)y=rtDayInterception(Number(lai)/10,points,sky);
+      else {
+        var hist=[];
+        hist[Number(lai)]=1;
+        var response=rtAbsorptionResponse(hist,day.background_red);
+        var terms=rtDayAbsorption(response,day.latitude,day.millis);
+        y=(1-sky)*terms[1]+sky*terms[3];
+      }
       n+=bin.n;sx+=bin[index];sxx+=bin[index+'_sq'];sy+=bin.n*y;sxy+=bin[index]*y;
     });
     if(n)moments.push({x:sx/n,y:sy/n,xx:sxx/n,xy:sxy/n,n:n});
@@ -3002,8 +3048,7 @@ function fetchRTCover(geom,start,end,km,request,done) {
                 var histogram=Array.apply(null,Array(81)).map(function(){return 0;});
                 covers.forEach(function(c){histogram[Math.round(-20*Math.log(1-c))]++;});
                 observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
-                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1],
-                  calibration:rtDayMoments(groups[date],covers)});
+                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1]});
                 nextDay();
               } catch(e){done(null,e.message);}
             }
@@ -3018,21 +3063,6 @@ function fetchRTCover(geom,start,end,km,request,done) {
 }
 
 // Equal total weight for each acquisition date. Keep within-date pixel covariance.
-function rtDayMoments(pixels,covers) {
-  var sx=0, sy=0, sxx=0, sxy=0, n=0;
-  pixels.forEach(function(p,i) {
-    var sum=p.red+p.nir;
-    if(sum<=0)return;
-    var x=(p.nir-p.red)/sum, y=covers[i];
-    sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; n++;
-  });
-  return n ? {x:sx/n,y:sy/n,xx:sxx/n,xy:sxy/n,n:n} : null;
-}
-function rtFitCoverLine(obs,first,last) {
-  var days=obs.filter(function(d){return d.calibration && d.millis>=first && d.millis<=last;});
-  var fit=rtEqualDateLine(days.map(function(d){return d.calibration;}));
-  return fit ? {m_cover:fit.slope,b_cover:fit.intercept,cover_fit_dates:fit.dates,cover_fit_pixels:fit.pixels} : null;
-}
 function rtEqualDateLine(moments) {
   var sx=0, sy=0, sxx=0, sxy=0, dates=moments.length, pixels=0;
   moments.forEach(function(d){
@@ -3237,10 +3267,8 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     else fetchGEPeriods(geom,start,end,cfg.satelliteSource||'MODIS16',periods,request,useGE);
   }
   if(rtAbsorptionMethod(params.faparMethod) || params.faparMethod==='PROSAIL' || params.fiparMethod==='PROSAIL' || params.fiparMethod==='RT_NDVI') {
-    if(rtAbsorptionMethod(params.faparMethod)){
-      if(cfg.rtDiffuse===undefined)cfg.rtDiffuse=.5;
-      if(!carbonFinite(cfg.rtDiffuse)||cfg.rtDiffuse<0||cfg.rtDiffuse>1){done(null,'Enter a diffuse PAR photon fraction between 0 and 1.');return;}
-    }
+    if(cfg.rtDiffuse===undefined)cfg.rtDiffuse=.5;
+    if(!carbonFinite(cfg.rtDiffuse)||cfg.rtDiffuse<0||cfg.rtDiffuse>1){done(null,'Enter a diffuse PAR photon fraction between 0 and 1.');return;}
     var km=cfg.rtBoxKm===undefined?10:cfg.rtBoxKm;
     if(!isFinite(km)||km<=0){done(null,'Enter a positive PROSAIL box side in km.');return;}
     var rtKey=JSON.stringify(['RT-MYD09A1-v4',geom.serialize(),km,start,end]);
@@ -3249,21 +3277,19 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       if(error){done(null,error);return;}
       if(!obs.length){done(null,'No PROSAIL fcover fits for the selected area and date range.');return;}
       store.put(rtKey,obs);
-      if(rtAbsorptionMethod(params.faparMethod)) absorptionObs=obs;
+      absorptionObs=obs;
       var absIndex=rtAbsIndex(params.faparMethod);
       if(absIndex){
-        var absFit=rtFitAbsorptionLine(obs,carbonDateMillis(start),carbonDateMillis(end),cfg.rtDiffuse,absIndex);
+        var absFit=rtFitDaylightLine(obs,carbonDateMillis(start),carbonDateMillis(end),cfg.rtDiffuse,absIndex,false);
         if(!absFit){done(null,'Chlorophyll calibration needs matched daylight pixels with varying '+absIndex.toUpperCase()+' inside the selected dates.');return;}
         params['m_abs_'+absIndex]=absFit.slope;params['b_abs_'+absIndex]=absFit.intercept;
         params.abs_fit_dates=absFit.dates;params.abs_fit_pixels=absFit.pixels;
       }
       if(params.fiparMethod==='RT_NDVI') {
-        var line=rtFitCoverLine(obs,carbonDateMillis(start),carbonDateMillis(end));
+        var line=rtFitDaylightLine(obs,carbonDateMillis(start),carbonDateMillis(end),cfg.rtDiffuse,'ndvi',true);
         if(!line){done(null,'PROSAIL calibration needs matched pixels with varying NDVI inside the selected dates.');return;}
-        params=mergeParams(params,line);
+        params=mergeParams(params,{m_cover:line.slope,b_cover:line.intercept,cover_fit_dates:line.dates,cover_fit_pixels:line.pixels});
       }
-      if(params.faparMethod==='PROSAIL' || params.fiparMethod==='PROSAIL')
-        cfg.rtPeriods=ee.Dictionary(rtCoverPeriods(obs,periods,SATELLITE_SOURCES.MODIS8.gap));
       startModelInputs();
     }
     var cachedCover=cfg.refreshInputs?null:store.get(rtKey);
@@ -4957,7 +4983,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = m_abs_evi2 × EVI2 + b_abs_evi2 (PROSAIL chlorophyll fit)', value: 'RT_CHL_EVI2'},
   {label: 'FAPAR = PROSAIL chlorophyll absorption', value: 'RT_CHL'},
   {label: 'FAPAR = PROSAIL green-leaf absorption', value: 'RT_LEAF'},
-  {label: 'FAPAR = PROSAIL fcover', value: 'PROSAIL'},
+  {label: 'FAPAR = PROSAIL daylight interception', value: 'PROSAIL'},
   {label: 'FAPAR = FIPAR × FAPARmult', value: 'FIPAR'},
   {label: 'FAPAR = NDVI²', value: 'NDVI'},
   {label: 'FAPAR = NIRv (NIR × NDVI)', value: 'NIRV'},
@@ -5034,8 +5060,8 @@ UI.inputPanel.add(UI.sharedFPAR);
 UI.inputPanel.add(ui.Label('FIPAR method (before optional shared FAPAR override)'));
 UI.fiparSelector = ui.Select({
   items: [
-    {label: 'FIPAR = m_cover × NDVI + b_cover (PROSAIL fit)', value: 'RT_NDVI'},
-    {label: 'FIPAR = PROSAIL fcover', value: 'PROSAIL'},
+    {label: 'FIPAR = m_cover × NDVI + b_cover (PROSAIL daylight fit)', value: 'RT_NDVI'},
+    {label: 'FIPAR = PROSAIL daylight interception', value: 'PROSAIL'},
     {label: 'FIPAR = scaled NDVI', value: 'NDVI'},
     {label: 'FIPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'}
   ],
@@ -5055,7 +5081,7 @@ function updateRTOptions() {
   if(rtWater)UI.sharedFPAR.setValue(false,false);
   UI.sharedFPAR.setDisabled(rtWater);
   var absorption=rtAbsorptionMethod(UI.faparSelector.getValue());
-  UI.rtSkyPanel.style().set('shown',absorption);
+  UI.rtSkyPanel.style().set('shown',absorption||rtWater||UI.faparSelector.getValue()==='PROSAIL');
   UI.rtBoxPanel.style().set('shown',absorption||rtWater||UI.faparSelector.getValue()==='PROSAIL');
 }
 UI.fiparSelector.onChange(updateRTOptions);
