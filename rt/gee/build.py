@@ -1,6 +1,7 @@
 """Build the standalone Earth Engine script with fixed PROSPECT-D leaf spectra."""
 from pathlib import Path
 import json
+from absorption import table
 import prosail
 import numpy as np
 from prosail.FourSAIL import verhoef_bimodal
@@ -19,6 +20,8 @@ header = """// ACCLIM-RT Earth Engine retrieval library.
 // Numerical reference: jgomezdans/prosail 2.0.5, FourSAIL.py.
 """
 text = header + "var RT_LEAF = " + json.dumps(constants, separators=(',', ':')) + ";\n"
+text += 'var RT_PAR = ' + json.dumps(table(), separators=(',', ':')) + ';\n'
+text += (root/'absorption.js').read_text(encoding='utf-8') + '\n'
 text += (root/'core.js').read_text(encoding='utf-8') + "\n"
 text += (root/'app.js').read_text(encoding='utf-8').split("if (typeof ui !== 'undefined') rtApp();")[0]
 text += (root/'model_cover.js').read_text(encoding='utf-8')

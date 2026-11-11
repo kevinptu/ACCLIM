@@ -56,7 +56,10 @@ function fetchRTCover(geom,start,end,km,request,done) {
               try {
                 if(!fit.step()){ui.util.setTimeout(advance,0);return;}
                 var covers=fit.bestCovers();
+                var histogram=Array.apply(null,Array(81)).map(function(){return 0;});
+                covers.forEach(function(c){histogram[Math.round(-20*Math.log(1-c))]++;});
                 observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
+                  lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1],
                   calibration:rtDayMoments(groups[date],covers)});
                 nextDay();
               } catch(e){done(null,e.message);}

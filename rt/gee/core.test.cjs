@@ -66,3 +66,27 @@ assert(Math.abs(line.b_cover-2/3)<1e-12);
 assert.equal(line.cover_fit_pixels,3);
 assert.equal(context.rtFitCoverLine(lineDays,1,2),null);
 assert.equal(context.rtFitCoverLine(lineDays,0,0).m_cover,1);
+
+// Match independently evaluated spectral FourSAIL fluxes for LAI 1.3, mu .55, flat background .2.
+const hist = Array(81).fill(0); hist[13]=4;
+const response=context.rtAbsorptionResponse(hist,.2), angles=context.RT_PAR.mu;
+const j=angles.indexOf(.55)*2;
+[response[j],response[j+1],...response.slice(-2)].forEach((v,i)=>{
+  assert(Math.abs(v-[.684791895,.558815381,.713196543,.533485125][i])<.000006);
+});
+const bare=Array(81).fill(0);bare[0]=4;
+assert(context.rtAbsorptionResponse(bare,.4).every(v=>v===0));
+const first=Date.UTC(2012,4,1);
+const observations=[{millis:first,background_red:.2,lai_histogram:bare},
+  {millis:first+2*day,background_red:.2,lai_histogram:hist}];
+const periods=[0,1,2].map(n=>({date:String(n),millis:first+n*day,period_end_millis:first+(n+1)*day,period_days:1,model_cadence:'daily'}));
+const radiation={[first]:50,[first+day]:150,[first+2*day]:250};
+const daily=context.rtAbsorptionPeriods(observations,periods,38.43,.5,radiation);
+assert.equal(daily['0'].FAPAR_chl,0);
+assert.equal(daily['1'].rt_abs_interpolated_days,1);
+assert(daily['1'].FAPAR_leaf>daily['1'].FAPAR_chl);
+const aggregate={date:'week',millis:first,period_end_millis:first+3*day,period_days:3,model_cadence:'weekly'};
+const week=context.rtAbsorptionPeriods(observations,[aggregate],38.43,.5,radiation).week;
+assert(Math.abs(week.FAPAR_chl-(150*daily['1'].FAPAR_chl+250*daily['2'].FAPAR_chl)/450)<1e-12);
+assert.equal(context.rtAbsorptionPeriods(observations,[aggregate],38.43,1,{}).week.FAPAR_leaf,undefined);
+console.log('PASS FourSAIL spectral absorption, bare ground, bracketed interpolation and photon-weighted aggregation.');

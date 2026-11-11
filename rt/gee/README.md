@@ -70,3 +70,17 @@ Equations and numerical reference:
 - Verhoef et al. 2007, doi:10.1109/TGRS.2007.895844.
 - https://github.com/jgomezdans/prosail (FourSAIL.py and PROSPECT-D).
 - https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MYD09A1
+
+## Green-leaf and chlorophyll absorption
+
+Select **FAPAR = PROSAIL green-leaf absorption** or **FAPAR = PROSAIL chlorophyll absorption**. Each option uses the selected fraction directly in photosynthesis, seasonal FAPAR tracking and the carbon/water coupling. Both values are included in model rows and the model CSV. FIPAR follows its own selection unless shared FAPAR is enabled.
+
+The absorption calculation uses the spatial mean over the fitted pixel LAI distribution. It weights each occupied LAI by its pixel count and uses the same fitted shared background and fixed leaf parameters as the red/NIR retrieval. Background reflectance is flat over PAR at the fitted red BRF. Chlorophyll content is fixed at 40 micrograms per square centimeter and carotenoids at 8. Seasonal changes arise through the fitted canopy state and illumination.
+
+At build time absorption.py uses Python FourSAIL hemispherical fluxes at 1 nm spacing from 400 through 700 nm. At each wavelength, foliage absorption equals incoming irradiance minus upward hemispherical flux at canopy top minus background absorption. Downward flux at the background includes multiple reflections. Chlorophyll absorption is the foliage absorption multiplied by the chlorophyll share of PROSPECT-D optical depth at that wavelength. Carotenoids, water and dry matter contribute to total optical depth. Brown pigments and anthocyanins have zero concentration in the fixed leaf model. This constituent partition assumes homogeneous mixing within the leaf.
+
+Direct and diffuse fractions use the respective PROSAIL library incident spectra converted from energy to photons by wavelength weighting, with trapezoidal endpoint weights. The embedded lookup spans the retrieval LAI grid, backgrounds 0–0.4 at 0.1 intervals, and solar zenith cosines from near the horizon to nadir. The app interpolates in background reflectance and zenith cosine. Solar zenith changes over the day. Sixteen midpoint intervals on either side of noon use incident PAR proportional to positive solar zenith cosine. Diffuse illumination is isotropic. The assumed fraction of incident PAR photons that is diffuse is adjustable (default 0.5); this is a sensitivity parameter.
+
+Response curves are interpolated between valid observations up to 32 days apart before evaluating the day's solar illumination. Period fractions are ratios of total absorbed to incident photons. Daily shortwave irradiance supplies the relative photon weights with ACCLIM's constant shortwave-to-PAR conversion. When only period weather is available its mean shortwave is held constant across those days. Monthly rows use the available days; daily and weekly rows require complete coverage. A zero incident-photon denominator yields an unavailable fraction.
+
+Outputs include FAPAR_leaf, FAPAR_chl, rt_leaf_direct, rt_chl_direct, rt_leaf_diffuse, rt_chl_diffuse, rt_diffuse_par_fraction, rt_abs_observed_days, rt_abs_interpolated_days, and rt_abs_missing_pct. The direct and diffuse columns are the two illumination limits before mixing.

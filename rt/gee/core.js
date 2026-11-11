@@ -184,12 +184,16 @@ var RT = (function () {
         near_backgrounds: near.length, pixels: pixels.length, geometries: keys.length,
         profile: profile, records: records};
     }
-    function bestCovers() {
+    function bestBackgroundIndex() {
       var best = 0;
       for (var s = 1; s < costs.length; s++) if (costs[s] < costs[best]) best = s;
+      return best;
+    }
+    function bestCovers() {
+      var best=bestBackgroundIndex();
       return choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); });
     }
-    return {step: step, finish: finish, bestCovers: bestCovers, geometries: keys.length};
+    return {step: step, finish: finish, bestCovers: bestCovers, bestRed: function(){return soils[bestBackgroundIndex()][0]/100;}, geometries: keys.length};
   }
   return {createFit: createFit, valid: valid, geometry: geometry, spectrum: spectrum, median: median};
 }());
