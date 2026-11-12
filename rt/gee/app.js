@@ -1,3 +1,7 @@
+function rtObjectiveSelector(initial) {
+  return ui.Select({items:[{label:'Red + NIR',value:'BRF'},{label:'Red + NIR + NDVI',value:'NDVI'},
+    {label:'Red + NIR + EVI2',value:'EVI2'}],value:initial||'BRF'});
+}
 // Earth Engine supplies screened pixels; the browser fits exact FourSAIL predictions.
 // Dates are actual acquisitions retained in MYD09A1, grouped separately within composites.
 function rtSample(image, region) {
@@ -70,7 +74,9 @@ function rtApp() {
   field('Latitude', lat); field('Longitude', lon); field('Asset (accessible to app users)', asset);
   field('Start date (YYYY-MM-DD)', start); field('End date, inclusive (YYYY-MM-DD)', end);
   field('Box side (km)', box);
-  field('Near-best background RMSE tolerance (BRF)', tolerance);
+  var objective=rtObjectiveSelector(typeof UI!=='undefined' && UI.rtObjective ? UI.rtObjective.getValue() : 'BRF');
+  field('PROSAIL fitting objective',objective);
+  field('Near-best objective tolerance (BRF-equivalent)', tolerance);
   panel.add(ui.Label('MYD09A1 retains selected acquisitions within each 8-day composite. The fit uses their actual dates and angles. Leaf properties are fixed; fcover = 1 âˆ’ exp(âˆ’0.5 Ã— LAI).'));
   var status = ui.Label('Ready.');
   var run = ui.Button('Run ACCLIM-RT'), cancel = ui.Button('Cancel');
@@ -158,7 +164,7 @@ function rtApp() {
         !isFinite(km) || km <= 0 || !tolerance.getValue().trim() || !isFinite(tol) || tol < 0) {
       status.setValue('Enter valid dates, a positive box size, and a nonnegative RMSE tolerance.'); return;
     }
-    var active = ++token;
+    var active = ++token, fitMode=objective.getValue();
     run.setDisabled(true);
     fits = {}; summaries = []; selected = null; charts.clear();
     function fail(error) {
@@ -219,7 +225,7 @@ function rtApp() {
                     coverage_percent: 100 * pixels.length / total});
                   ui.util.setTimeout(nextDate, 0); return;
                 }
-                var fit = RT.createFit(pixels), progress = 0;
+                var fit = RT.createFit(pixels,fitMode), progress = 0;
                 function advance() {
                   if (active !== token) return;
                   try {
@@ -232,7 +238,7 @@ function rtApp() {
                     fits[day] = result;
                     summaries.push({date: day, status: 'fitted', fcover: result.fcover,
                       fcover_mean: result.fcover_mean, fcover_low: result.fcover_low,
-                      fcover_high: result.fcover_high, lai: result.lai, rmse: result.rmse,
+                      fcover_high: result.fcover_high, lai: result.lai, rmse: result.rmse, objective:fitMode, objective_score:result.objective_score, red_rmse:result.red_rmse, nir_rmse:result.nir_rmse, ndvi_rmse:result.ndvi_rmse, evi2_rmse:result.evi2_rmse,
                       background_red: result.background_red, background_nir: result.background_nir,
                       pixels: result.pixels, geometries: result.geometries,
                       coverage_percent: 100 * result.pixels / total, near_backgrounds: result.near_backgrounds,

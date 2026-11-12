@@ -115,3 +115,27 @@ for(const index of ['ndvi','evi2']){
   assert.equal(fit.pixels,5);assert.equal(fit.dates,2);
 }
 console.log('PASS date-weighted pixel regressions for chlorophyll absorption against NDVI and EVI2.');
+
+// Reconstruct the winning objective and band errors from the selected LAIs and background.
+const spectra=[[.06,.26],[.13,.24],[0,0],[.17,.32]].map(([red,nir],i)=>({
+  red,nir,x:i,y:0,solar_zenith:32,view_zenith:14,relative_azimuth:110
+}));
+for(const mode of ['BRF','NDVI','EVI2']){
+  const f=RT.createFit(spectra,mode);while(!f.step()){}
+  const res=f.finish(0);
+  const I=(r,n)=>mode==='NDVI'?(n-r)/(n+r):2.5*(n-r)/(1+n+2.4*r);
+  let bands=0,extra=0;
+  for(const p of res.records){
+    const s=RT.spectrum(RT.geometry(32,14,110),p.lai);
+    const r=s[Math.round(100*res.background_red)-1],n=s[Math.round(100*res.background_nir)+49];
+    bands+=(r-p.red)**2+(n-p.nir)**2;
+    if(mode==='BRF'||(mode==='NDVI'&&p.red+p.nir===0))continue;
+    const h=1e-6;
+    const grad=Math.hypot(I(p.red+h,p.nir)-I(p.red-h,p.nir),I(p.red,p.nir+h)-I(p.red,p.nir-h))/(2*h);
+    extra+=((I(r,n)-I(p.red,p.nir))/grad)**2;
+  }
+  assert(Math.abs(Math.sqrt(bands/8)-res.rmse)<1e-10);
+  assert(Math.abs(Math.sqrt((bands+extra)/8)-res.objective_score)<1e-9);
+  assert.equal(res.objective_score,Math.min(...res.profile.map(r=>r.objective_score)));
+}
+console.log('PASS scaled index objectives and independent BRF diagnostics.');

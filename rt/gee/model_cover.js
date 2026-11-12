@@ -22,7 +22,7 @@ function rtCoverPeriods(observations, periods, gapDays) {
   });
   return result;
 }
-function fetchRTCover(geom,start,end,km,request,done) {
+function fetchRTCover(geom,start,end,km,mode,request,done) {
   var gap = SATELLITE_SOURCES.MODIS8.gap;
   var first = carbonDateMillis(start)-gap*86400000, last = carbonDateMillis(end)+gap*86400000;
   var observations = [];
@@ -49,7 +49,7 @@ function fetchRTCover(geom,start,end,km,request,done) {
           function nextDay() {
             if(request!==UI._requestId)return;
             if(!days.length){nextImage();return;}
-            var date=days.shift(), fit=RT.createFit(groups[date]);
+            var date=days.shift(), fit=RT.createFit(groups[date],mode);
             setStatus('Fitting PROSAIL fcover for '+date+' ('+groups[date].length+' pixels)');
             function advance() {
               if(request!==UI._requestId)return;
@@ -59,7 +59,7 @@ function fetchRTCover(geom,start,end,km,request,done) {
                 var histogram=Array.apply(null,Array(81)).map(function(){return 0;});
                 covers.forEach(function(c){histogram[Math.round(-20*Math.log(1-c))]++;});
                 observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
-                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1]});
+                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1],brf_rmse:fit.brfRMSE()});
                 nextDay();
               } catch(e){done(null,e.message);}
             }

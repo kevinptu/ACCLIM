@@ -2640,8 +2640,24 @@ var RT = (function () {
       p.view_zenith >= 0 && p.view_zenith < 90 &&
       p.relative_azimuth >= 0 && p.relative_azimuth <= 180;
   }
-  function createFit(pixels) {
+  // Convert an index residual to BRF units using its gradient at the observation.
+  // Assumes equal independent red/NIR errors. One index term has unit weight.
+  function indexTerm(red,nir,mode) {
+    if(mode==='BRF')return null;
+    var sum=red+nir;
+    if(mode==='NDVI' && sum===0)return null;
+    var den=mode==='NDVI'?sum:1+nir+2.4*red;
+    var gain=mode==='NDVI'?1:2.5;
+    var dRed=mode==='NDVI'?-2*nir:-2.5*(1+3.4*nir);
+    var dNir=mode==='NDVI'?2*red:2.5*(1+3.4*red);
+    return {observed:gain*(nir-red)/den, scale:den*den/Math.sqrt(dRed*dRed+dNir*dNir)};
+  }
+  function createFit(pixels,mode) {
+    mode=mode||'BRF';
+    if(['BRF','NDVI','EVI2'].indexOf(mode)<0)throw new Error('Unknown PROSAIL fitting objective.');
+    var redCosts=new Float64Array(soils.length), nirCosts=new Float64Array(soils.length);
     var groups = {}, costs = new Float64Array(soils.length);
+    var ndviCosts=new Float64Array(soils.length), evi2Costs=new Float64Array(soils.length), ndviCount=0;
     var choices = pixels.map(function () { return new Uint8Array(soils.length); });
     pixels.forEach(function (p, i) {
       if (!valid(p)) throw new Error('Invalid reflectance or geometry.');
@@ -2657,16 +2673,34 @@ var RT = (function () {
       var lut = [];
       for (var l = 0; l <= 80; l++) lut.push(spectrum(g, l / 10));
       members.forEach(function (index) {
-        var pixel = pixels[index];
+        var pixel = pixels[index], term=indexTerm(pixel.red,pixel.nir,mode);
+        var sum=pixel.red+pixel.nir;
+        var obsNDVI=sum>0?(pixel.nir-pixel.red)/sum:null;
+        var obsEVI2=2.5*(pixel.nir-pixel.red)/(1+pixel.nir+2.4*pixel.red);
+        if(sum>0)ndviCount++;
         for (var s = 0; s < soils.length; s++) {
           var redIndex = soils[s][0] - 1, nirIndex = soils[s][1] + 49;
-          var best = Infinity, selected = 0;
+          var best = Infinity, selected = 0, bestRedError=0, bestNirError=0;
           for (var a = 0; a <= 80; a++) {
-            var dr = lut[a][redIndex] - pixel.red, dn = lut[a][nirIndex] - pixel.nir;
+            var red=lut[a][redIndex], nir=lut[a][nirIndex];
+            var dr=red-pixel.red, dn=nir-pixel.nir;
             var error = dr * dr + dn * dn;
-            if (error < best) { best = error; selected = a; }
+            if(term){
+              var predicted=mode==='NDVI'?(nir-red)/(nir+red):2.5*(nir-red)/(1+nir+2.4*red);
+              var residual=(predicted-term.observed)*term.scale;
+              error+=residual*residual;
+            }
+            if (error < best) { best=error; selected=a; bestRedError=dr; bestNirError=dn; }
           }
+          var fitRed=lut[selected][redIndex], fitNir=lut[selected][nirIndex];
+          if(sum>0){
+            var deltaNDVI=(fitNir-fitRed)/(fitNir+fitRed)-obsNDVI;
+            ndviCosts[s]+=deltaNDVI*deltaNDVI;
+          }
+          var deltaEVI2=2.5*(fitNir-fitRed)/(1+fitNir+2.4*fitRed)-obsEVI2;
+          evi2Costs[s]+=deltaEVI2*deltaEVI2;
           costs[s] += best;
+          redCosts[s]+=bestRedError*bestRedError; nirCosts[s]+=bestNirError*bestNirError;
           choices[index][s] = selected;
         }
       });
@@ -2674,15 +2708,14 @@ var RT = (function () {
       return next === keys.length;
     }
     function finish(tolerance) {
-      var rmse = Array.prototype.map.call(costs, function (c) { return Math.sqrt(c / (2 * pixels.length)); });
-      var best = 0;
-      for (var s = 1; s < soils.length; s++) if (rmse[s] < rmse[best]) best = s;
-      var near = [];
-      rmse.forEach(function (v, i) { if (v <= rmse[best] + tolerance) near.push(i); });
+      var score = Array.prototype.map.call(costs, function (c) { return Math.sqrt(c / (2 * pixels.length)); });
+      var best=bestBackgroundIndex(), near=[];
+      var rmse=Array.prototype.map.call(redCosts,function(c,i){return Math.sqrt((c+nirCosts[i])/(2*pixels.length));});
+      score.forEach(function(v,i){if(v<=score[best]+tolerance)near.push(i);});
       var covers = choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); });
       var profile = soils.map(function (soil, i) {
         return {background_red: soil[0] / 100, background_nir: soil[1] / 100,
-          rmse: rmse[i], fcover: median(choices.map(function (a) { return 1 - Math.exp(-.05 * a[i]); }))};
+          objective: mode, objective_score: score[i], rmse: rmse[i], fcover: median(choices.map(function (a) { return 1 - Math.exp(-.05 * a[i]); }))};
       });
       var medians = near.map(function (i) { return profile[i].fcover; });
       var records = pixels.map(function (p, i) {
@@ -2697,7 +2730,9 @@ var RT = (function () {
       });
       return {fcover: median(covers), fcover_mean: covers.reduce(function (a, b) { return a + b; }, 0) / covers.length,
         lai: median(choices.map(function (a) { return a[best] / 10; })),
-        rmse: rmse[best], background_red: soils[best][0] / 100, background_nir: soils[best][1] / 100,
+        objective:mode, objective_score:score[best], ndvi_rmse:ndviCount?Math.sqrt(ndviCosts[best]/ndviCount):null,
+        evi2_rmse:Math.sqrt(evi2Costs[best]/pixels.length), red_rmse:Math.sqrt(redCosts[best]/pixels.length),
+        nir_rmse:Math.sqrt(nirCosts[best]/pixels.length), rmse: rmse[best], background_red: soils[best][0] / 100, background_nir: soils[best][1] / 100,
         fcover_low: Math.min.apply(null, medians), fcover_high: Math.max.apply(null, medians),
         near_backgrounds: near.length, pixels: pixels.length, geometries: keys.length,
         profile: profile, records: records};
@@ -2711,11 +2746,15 @@ var RT = (function () {
       var best=bestBackgroundIndex();
       return choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); });
     }
-    return {step: step, finish: finish, bestCovers: bestCovers, bestRed: function(){return soils[bestBackgroundIndex()][0]/100;}, geometries: keys.length};
+    return {step: step, finish: finish, bestCovers: bestCovers, brfRMSE:function(){var i=bestBackgroundIndex();return Math.sqrt((redCosts[i]+nirCosts[i])/(2*pixels.length));}, bestRed: function(){return soils[bestBackgroundIndex()][0]/100;}, geometries: keys.length};
   }
   return {createFit: createFit, valid: valid, geometry: geometry, spectrum: spectrum, median: median};
 }());
 
+function rtObjectiveSelector(initial) {
+  return ui.Select({items:[{label:'Red + NIR',value:'BRF'},{label:'Red + NIR + NDVI',value:'NDVI'},
+    {label:'Red + NIR + EVI2',value:'EVI2'}],value:initial||'BRF'});
+}
 // Earth Engine supplies screened pixels; the browser fits exact FourSAIL predictions.
 // Dates are actual acquisitions retained in MYD09A1, grouped separately within composites.
 function rtSample(image, region) {
@@ -2788,7 +2827,9 @@ function rtApp() {
   field('Latitude', lat); field('Longitude', lon); field('Asset (accessible to app users)', asset);
   field('Start date (YYYY-MM-DD)', start); field('End date, inclusive (YYYY-MM-DD)', end);
   field('Box side (km)', box);
-  field('Near-best background RMSE tolerance (BRF)', tolerance);
+  var objective=rtObjectiveSelector(typeof UI!=='undefined' && UI.rtObjective ? UI.rtObjective.getValue() : 'BRF');
+  field('PROSAIL fitting objective',objective);
+  field('Near-best objective tolerance (BRF-equivalent)', tolerance);
   panel.add(ui.Label('MYD09A1 retains selected acquisitions within each 8-day composite. The fit uses their actual dates and angles. Leaf properties are fixed; fcover = 1 âˆ’ exp(âˆ’0.5 Ã— LAI).'));
   var status = ui.Label('Ready.');
   var run = ui.Button('Run ACCLIM-RT'), cancel = ui.Button('Cancel');
@@ -2876,7 +2917,7 @@ function rtApp() {
         !isFinite(km) || km <= 0 || !tolerance.getValue().trim() || !isFinite(tol) || tol < 0) {
       status.setValue('Enter valid dates, a positive box size, and a nonnegative RMSE tolerance.'); return;
     }
-    var active = ++token;
+    var active = ++token, fitMode=objective.getValue();
     run.setDisabled(true);
     fits = {}; summaries = []; selected = null; charts.clear();
     function fail(error) {
@@ -2937,7 +2978,7 @@ function rtApp() {
                     coverage_percent: 100 * pixels.length / total});
                   ui.util.setTimeout(nextDate, 0); return;
                 }
-                var fit = RT.createFit(pixels), progress = 0;
+                var fit = RT.createFit(pixels,fitMode), progress = 0;
                 function advance() {
                   if (active !== token) return;
                   try {
@@ -2950,7 +2991,7 @@ function rtApp() {
                     fits[day] = result;
                     summaries.push({date: day, status: 'fitted', fcover: result.fcover,
                       fcover_mean: result.fcover_mean, fcover_low: result.fcover_low,
-                      fcover_high: result.fcover_high, lai: result.lai, rmse: result.rmse,
+                      fcover_high: result.fcover_high, lai: result.lai, rmse: result.rmse, objective:fitMode, objective_score:result.objective_score, red_rmse:result.red_rmse, nir_rmse:result.nir_rmse, ndvi_rmse:result.ndvi_rmse, evi2_rmse:result.evi2_rmse,
                       background_red: result.background_red, background_nir: result.background_nir,
                       pixels: result.pixels, geometries: result.geometries,
                       coverage_percent: 100 * result.pixels / total, near_backgrounds: result.near_backgrounds,
@@ -3011,7 +3052,7 @@ function rtCoverPeriods(observations, periods, gapDays) {
   });
   return result;
 }
-function fetchRTCover(geom,start,end,km,request,done) {
+function fetchRTCover(geom,start,end,km,mode,request,done) {
   var gap = SATELLITE_SOURCES.MODIS8.gap;
   var first = carbonDateMillis(start)-gap*86400000, last = carbonDateMillis(end)+gap*86400000;
   var observations = [];
@@ -3038,7 +3079,7 @@ function fetchRTCover(geom,start,end,km,request,done) {
           function nextDay() {
             if(request!==UI._requestId)return;
             if(!days.length){nextImage();return;}
-            var date=days.shift(), fit=RT.createFit(groups[date]);
+            var date=days.shift(), fit=RT.createFit(groups[date],mode);
             setStatus('Fitting PROSAIL fcover for '+date+' ('+groups[date].length+' pixels)');
             function advance() {
               if(request!==UI._requestId)return;
@@ -3048,7 +3089,7 @@ function fetchRTCover(geom,start,end,km,request,done) {
                 var histogram=Array.apply(null,Array(81)).map(function(){return 0;});
                 covers.forEach(function(c){histogram[Math.round(-20*Math.log(1-c))]++;});
                 observations.push({millis:carbonDateMillis(date),cover:RT.median(covers),
-                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1]});
+                  index_bins:rtIndexBins(groups[date],covers),lai_histogram:histogram,background_red:fit.bestRed(),latitude:xy[1],brf_rmse:fit.brfRMSE()});
                 nextDay();
               } catch(e){done(null,e.message);}
             }
@@ -3099,6 +3140,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
         d['m_abs_'+absIndex]=params['m_abs_'+absIndex];d['b_abs_'+absIndex]=params['b_abs_'+absIndex];
         d.abs_fit_dates=params.abs_fit_dates;d.abs_fit_pixels=params.abs_fit_pixels;
       }
+      if(absorptionObs)d.rt_fit_objective=cfg.rtObjective||'BRF';
       d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
@@ -3271,7 +3313,8 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     if(!carbonFinite(cfg.rtDiffuse)||cfg.rtDiffuse<0||cfg.rtDiffuse>1){done(null,'Enter a diffuse PAR photon fraction between 0 and 1.');return;}
     var km=cfg.rtBoxKm===undefined?10:cfg.rtBoxKm;
     if(!isFinite(km)||km<=0){done(null,'Enter a positive PROSAIL box side in km.');return;}
-    var rtKey=JSON.stringify(['RT-MYD09A1-v4',geom.serialize(),km,start,end]);
+    var fitMode=cfg.rtObjective||'BRF';
+    var rtKey=JSON.stringify(['RT-MYD09A1-v5',fitMode,geom.serialize(),km,start,end]);
     function useCover(obs,error) {
       if(request!==UI._requestId)return;
       if(error){done(null,error);return;}
@@ -3293,7 +3336,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
       startModelInputs();
     }
     var cachedCover=cfg.refreshInputs?null:store.get(rtKey);
-    if(cachedCover)useCover(cachedCover);else fetchRTCover(geom,start,end,km,request,useCover);
+    if(cachedCover)useCover(cachedCover);else fetchRTCover(geom,start,end,km,fitMode,request,useCover);
   } else startModelInputs();
 }
 
@@ -5070,7 +5113,8 @@ UI.fiparSelector = ui.Select({
 });
 UI.inputPanel.add(UI.fiparSelector);
 UI.rtBoxKm=ui.Textbox({value:'10',style:{stretch:'horizontal'}});
-UI.rtBoxPanel=ui.Panel([ui.Label('PROSAIL box side (km), Aqua MODIS 8-day'),UI.rtBoxKm]);
+UI.rtObjective=rtObjectiveSelector('BRF');
+UI.rtBoxPanel=ui.Panel([ui.Label('PROSAIL fitting objective'),UI.rtObjective,ui.Label('PROSAIL box side (km), Aqua MODIS 8-day'),UI.rtBoxKm]);
 UI.inputPanel.add(UI.rtBoxPanel);
 UI.rtDiffuse=ui.Textbox({value:'0.5'});
 UI.rtSkyPanel=ui.Panel([ui.Label('Assumed diffuse fraction of incident PAR photons (0–1)'),UI.rtDiffuse]);
@@ -5672,7 +5716,7 @@ function onRun() {
         return;
       }
       try {
-    var runDataConfig={rtDiffuse:UI.rtDiffuse.getValue().trim()===''?NaN:Number(UI.rtDiffuse.getValue()),rtBoxKm:Number(UI.rtBoxKm.getValue()),refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
+    var runDataConfig={rtObjective:UI.rtObjective.getValue(),rtDiffuse:UI.rtDiffuse.getValue().trim()===''?NaN:Number(UI.rtDiffuse.getValue()),rtBoxKm:Number(UI.rtBoxKm.getValue()),refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
     runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: rtAbsorptionMethod(UI.faparSelector.getValue()) ? UI.faparSelector.getValue() : UI.faparSelector.getValue() === 'PROSAIL' ? 'PROSAIL' : UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}

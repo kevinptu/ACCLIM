@@ -122,8 +122,24 @@ var RT = (function () {
       p.view_zenith >= 0 && p.view_zenith < 90 &&
       p.relative_azimuth >= 0 && p.relative_azimuth <= 180;
   }
-  function createFit(pixels) {
+  // Convert an index residual to BRF units using its gradient at the observation.
+  // Assumes equal independent red/NIR errors. One index term has unit weight.
+  function indexTerm(red,nir,mode) {
+    if(mode==='BRF')return null;
+    var sum=red+nir;
+    if(mode==='NDVI' && sum===0)return null;
+    var den=mode==='NDVI'?sum:1+nir+2.4*red;
+    var gain=mode==='NDVI'?1:2.5;
+    var dRed=mode==='NDVI'?-2*nir:-2.5*(1+3.4*nir);
+    var dNir=mode==='NDVI'?2*red:2.5*(1+3.4*red);
+    return {observed:gain*(nir-red)/den, scale:den*den/Math.sqrt(dRed*dRed+dNir*dNir)};
+  }
+  function createFit(pixels,mode) {
+    mode=mode||'BRF';
+    if(['BRF','NDVI','EVI2'].indexOf(mode)<0)throw new Error('Unknown PROSAIL fitting objective.');
+    var redCosts=new Float64Array(soils.length), nirCosts=new Float64Array(soils.length);
     var groups = {}, costs = new Float64Array(soils.length);
+    var ndviCosts=new Float64Array(soils.length), evi2Costs=new Float64Array(soils.length), ndviCount=0;
     var choices = pixels.map(function () { return new Uint8Array(soils.length); });
     pixels.forEach(function (p, i) {
       if (!valid(p)) throw new Error('Invalid reflectance or geometry.');
@@ -139,16 +155,34 @@ var RT = (function () {
       var lut = [];
       for (var l = 0; l <= 80; l++) lut.push(spectrum(g, l / 10));
       members.forEach(function (index) {
-        var pixel = pixels[index];
+        var pixel = pixels[index], term=indexTerm(pixel.red,pixel.nir,mode);
+        var sum=pixel.red+pixel.nir;
+        var obsNDVI=sum>0?(pixel.nir-pixel.red)/sum:null;
+        var obsEVI2=2.5*(pixel.nir-pixel.red)/(1+pixel.nir+2.4*pixel.red);
+        if(sum>0)ndviCount++;
         for (var s = 0; s < soils.length; s++) {
           var redIndex = soils[s][0] - 1, nirIndex = soils[s][1] + 49;
-          var best = Infinity, selected = 0;
+          var best = Infinity, selected = 0, bestRedError=0, bestNirError=0;
           for (var a = 0; a <= 80; a++) {
-            var dr = lut[a][redIndex] - pixel.red, dn = lut[a][nirIndex] - pixel.nir;
+            var red=lut[a][redIndex], nir=lut[a][nirIndex];
+            var dr=red-pixel.red, dn=nir-pixel.nir;
             var error = dr * dr + dn * dn;
-            if (error < best) { best = error; selected = a; }
+            if(term){
+              var predicted=mode==='NDVI'?(nir-red)/(nir+red):2.5*(nir-red)/(1+nir+2.4*red);
+              var residual=(predicted-term.observed)*term.scale;
+              error+=residual*residual;
+            }
+            if (error < best) { best=error; selected=a; bestRedError=dr; bestNirError=dn; }
           }
+          var fitRed=lut[selected][redIndex], fitNir=lut[selected][nirIndex];
+          if(sum>0){
+            var deltaNDVI=(fitNir-fitRed)/(fitNir+fitRed)-obsNDVI;
+            ndviCosts[s]+=deltaNDVI*deltaNDVI;
+          }
+          var deltaEVI2=2.5*(fitNir-fitRed)/(1+fitNir+2.4*fitRed)-obsEVI2;
+          evi2Costs[s]+=deltaEVI2*deltaEVI2;
           costs[s] += best;
+          redCosts[s]+=bestRedError*bestRedError; nirCosts[s]+=bestNirError*bestNirError;
           choices[index][s] = selected;
         }
       });
@@ -156,15 +190,14 @@ var RT = (function () {
       return next === keys.length;
     }
     function finish(tolerance) {
-      var rmse = Array.prototype.map.call(costs, function (c) { return Math.sqrt(c / (2 * pixels.length)); });
-      var best = 0;
-      for (var s = 1; s < soils.length; s++) if (rmse[s] < rmse[best]) best = s;
-      var near = [];
-      rmse.forEach(function (v, i) { if (v <= rmse[best] + tolerance) near.push(i); });
+      var score = Array.prototype.map.call(costs, function (c) { return Math.sqrt(c / (2 * pixels.length)); });
+      var best=bestBackgroundIndex(), near=[];
+      var rmse=Array.prototype.map.call(redCosts,function(c,i){return Math.sqrt((c+nirCosts[i])/(2*pixels.length));});
+      score.forEach(function(v,i){if(v<=score[best]+tolerance)near.push(i);});
       var covers = choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); });
       var profile = soils.map(function (soil, i) {
         return {background_red: soil[0] / 100, background_nir: soil[1] / 100,
-          rmse: rmse[i], fcover: median(choices.map(function (a) { return 1 - Math.exp(-.05 * a[i]); }))};
+          objective: mode, objective_score: score[i], rmse: rmse[i], fcover: median(choices.map(function (a) { return 1 - Math.exp(-.05 * a[i]); }))};
       });
       var medians = near.map(function (i) { return profile[i].fcover; });
       var records = pixels.map(function (p, i) {
@@ -179,7 +212,9 @@ var RT = (function () {
       });
       return {fcover: median(covers), fcover_mean: covers.reduce(function (a, b) { return a + b; }, 0) / covers.length,
         lai: median(choices.map(function (a) { return a[best] / 10; })),
-        rmse: rmse[best], background_red: soils[best][0] / 100, background_nir: soils[best][1] / 100,
+        objective:mode, objective_score:score[best], ndvi_rmse:ndviCount?Math.sqrt(ndviCosts[best]/ndviCount):null,
+        evi2_rmse:Math.sqrt(evi2Costs[best]/pixels.length), red_rmse:Math.sqrt(redCosts[best]/pixels.length),
+        nir_rmse:Math.sqrt(nirCosts[best]/pixels.length), rmse: rmse[best], background_red: soils[best][0] / 100, background_nir: soils[best][1] / 100,
         fcover_low: Math.min.apply(null, medians), fcover_high: Math.max.apply(null, medians),
         near_backgrounds: near.length, pixels: pixels.length, geometries: keys.length,
         profile: profile, records: records};
@@ -193,7 +228,7 @@ var RT = (function () {
       var best=bestBackgroundIndex();
       return choices.map(function (a) { return 1 - Math.exp(-.05 * a[best]); });
     }
-    return {step: step, finish: finish, bestCovers: bestCovers, bestRed: function(){return soils[bestBackgroundIndex()][0]/100;}, geometries: keys.length};
+    return {step: step, finish: finish, bestCovers: bestCovers, brfRMSE:function(){var i=bestBackgroundIndex();return Math.sqrt((redCosts[i]+nirCosts[i])/(2*pixels.length));}, bestRed: function(){return soils[bestBackgroundIndex()][0]/100;}, geometries: keys.length};
   }
   return {createFit: createFit, valid: valid, geometry: geometry, spectrum: spectrum, median: median};
 }());
