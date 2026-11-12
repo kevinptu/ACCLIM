@@ -64,22 +64,20 @@ function rtDayInterception(lai,points,sky) {
   }
   return light ? (1-sky)*beam/light+sky*diffuse : null;
 }
-// Keep the direct-cover option's spatial median, including its even-pixel convention.
-function rtCentralLAIs(histogram) {
-  var count=histogram.reduce(function(a,b){return a+b;},0);
-  var ranks=[Math.floor((count-1)/2),Math.floor(count/2)];
-  return ranks.map(function(rank){
-    for(var i=0;i<histogram.length;i++){rank-=histogram[i]||0;if(rank<0)return i/10;}
-    throw new Error('Empty RT canopy histogram.');
+// Equal-area pixels share illumination. Weight each LAI response by its pixel count.
+function rtMeanInterception(histogram,points,sky) {
+  var total=0, pixels=0;
+  histogram.forEach(function(count,index){
+    if(count){
+      total+=count*rtDayInterception(index/10,points,sky);
+      pixels+=count;
+    }
   });
-}
-function rtMedianInterception(pair,points,sky) {
-  return (rtDayInterception(pair[0],points,sky)+rtDayInterception(pair[1],points,sky))/2;
+  return total/pixels;
 }
 // Interpolate responses at common illumination before applying each day's solar geometry.
 function rtAbsorptionPeriods(obs, periods, latitude, sky, radiation) {
   var sorted=obs.slice().sort(function(a,b){return a.millis-b.millis;});
-  var central=sorted.map(function(d){return rtCentralLAIs(d.lai_histogram);});
   var curves=sorted.map(function(d){return rtAbsorptionResponse(d.lai_histogram,d.background_red);});
   var j=0, output={};
   periods.forEach(function(period){
@@ -99,8 +97,8 @@ function rtAbsorptionPeriods(obs, periods, latitude, sky, radiation) {
       if(!day)continue;
       for(var k=0;k<4;k++)totals[k]+=q*day[k];
       var points=rtSunCosines(latitude,t);
-      var value=rtMedianInterception(central[j],points,sky);
-      if(!exact)value=w*value+(1-w)*rtMedianInterception(central[j-1],points,sky);
+      var value=rtMeanInterception(sorted[j].lai_histogram,points,sky);
+      if(!exact)value=w*value+(1-w)*rtMeanInterception(sorted[j-1].lai_histogram,points,sky);
       intercepted+=q*value;
       energy+=q;
     }

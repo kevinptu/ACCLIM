@@ -139,3 +139,8 @@ for(const mode of ['BRF','NDVI','EVI2']){
   assert.equal(res.objective_score,Math.min(...res.profile.map(r=>r.objective_score)));
 }
 console.log('PASS scaled index objectives and independent BRF diagnostics.');
+const skewedHistogram=Array(81).fill(0);
+skewedHistogram[0]=3;skewedHistogram[20]=1;
+const skewedResult=context.rtAbsorptionPeriods([{millis:first,lai_histogram:skewedHistogram,background_red:.2}],periods.slice(0,1),38.43,.5,radiation)['0'];
+const expectedInterception=context.rtDayInterception(2,context.rtSunCosines(38.43,first),.5)/4;
+assert(Math.abs(skewedResult.rt_fipar_daylight-expectedInterception)<1e-12);

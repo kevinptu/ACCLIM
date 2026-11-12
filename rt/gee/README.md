@@ -33,7 +33,7 @@ The soil-template subset is omitted. The broad grid and fitting objective match 
 
 ## Relation to ACCLIM FAPAR and FIPAR
 
-For a selected PROSAIL fraction the model uses the date-specific spatial median of projected nadir foliage cover directly. A selected FAPAR equals cover even when fexp differs from 1. FIPAR feeds canopy energy and water partitioning, including the gridded net-radiation calculation. The model keeps its selected weather and satellite sources for its other inputs.
+The direct daylight interception option uses the spatial mean across screened pixels. When selected for FAPAR this fraction enters photosynthesis directly. FIPAR feeds canopy energy and water partitioning, including the gridded net-radiation calculation. The model keeps its selected weather and satellite sources for its other inputs.
 
 Daily cover uses linear interpolation between bracketing acquisitions up to 32 days apart. The retrieval includes 32 days on either side of the request for bracketing. Weekly periods take the mean with complete daily coverage. Monthly periods take the median of available daily estimates. rt_observed_days, rt_interpolated_days and rt_missing_pct describe coverage. Periods without sufficient coverage have unavailable physiology. Repeated experiments can reuse the same fitted dates through the existing input cache.
 
@@ -92,7 +92,7 @@ The two chlorophyll-fit FAPAR choices regress modeled pixel chlorophyll absorpti
 
 The direct cover-derived FIPAR and FAPAR options use daylight interception. The NDVI-based FIPAR option calibrates each matched pixel against interception for its acquisition date. The spherical canopy intercepts 1 − exp(−0.5 LAI / cos(zenith)) of a direct beam. Direct daylight averaging uses the same solar zenith samples and cosine irradiance weights as absorption. Isotropic diffuse interception uses 64 midpoint samples of 2 mu times interception, integrated over mu from zero to one. The diffuse PAR fraction control applies to both interception and absorption.
 
-Direct interception preserves the spatial median of the box. For periods between acquisitions the app interpolates bracketing canopy responses evaluated at the modeled day's illumination; multi-day values use incident shortwave weights. Model rows expose rt_fipar_daylight for the directly estimated fraction, rt_fcover for the nadir cover diagnostic, and FIPAR for the value actually used by the model. The standalone retrieval diagnostics continue to report nadir cover.
+Direct interception averages each fitted LAI’s daylight interception in proportion to its pixel count, using the same spatial support as absorption. For periods between acquisitions the app interpolates bracketing canopy responses evaluated at the modeled day's illumination; multi-day values use incident shortwave weights. Model rows expose rt_fipar_daylight for the directly estimated fraction, rt_fcover for the nadir cover diagnostic, and FIPAR for the value actually used by the model. The standalone retrieval diagnostics continue to report nadir cover.
 
 ## Optional index constraints on the RT retrieval
 
