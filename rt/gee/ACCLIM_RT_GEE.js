@@ -19,6 +19,7 @@
 // ============================================================================
 
 var ACCLIM_PARAMS = {
+  kndvi_sigma: 0.15, // RBF bandwidth in fractional reflectance units (IPL-UV GEE example)
   GE_scale: 0.07,        // GE reference used by fge = clamp01(GE / GE_scale)^fge_exp
   blend_exp: 1.6,          // NDVI exponent controlling the weight in both blend options
   fiparMethod: 'NDVI',    // NDVI scaling or NDVI-weighted GE blend
@@ -1157,6 +1158,13 @@ function computeFIPAR(ndvi, p, ge) {
 // EVI2_FITTED_MIN: same fitted lo, hi = 0.6; B = clamp01((EVI2-lo)/(0.6-lo)).
 // Invalid EVI2 fits fall back to B = NDVI^2. fexp is applied after that fallback too.
 function photosyntheticFAPAR(instant, p) {
+  // IPL-UV general RBF kNDVI: k=exp(-(NIR-red)^2/(2*sigma^2)); B=(1-k)/(1+k).
+  // FAPAR = B^fexp. Inputs are the selected timestep's fractional reflectances.
+  if (p.faparMethod === 'KNDVI') {
+    var distance = ee.Number(instant.get('nir')).subtract(instant.get('red')).divide(p.kndvi_sigma);
+    var kernel = distance.pow(2).multiply(-0.5).exp();
+    return ee.Number(1).subtract(kernel).divide(kernel.add(1)).pow(p.fexp);
+  }
   // Explicit cover option: FAPAR equals retrieved cover at the selected model timestep.
   // Photon-weighted 400–700 nm absorptance from the fitted FourSAIL foliage state.
   // Fitted FAPAR = clamp01(m_abs_index * model index + b_abs_index).
@@ -2059,16 +2067,18 @@ function runACCLIM(forcingFC, params) {
     var hasGE=f.toDictionary(['GE']).size().gt(0);
     return f.set({model_valid:ee.Algorithms.If(hasGE,f.get('model_valid'),0),GE_missing_for_GPP:hasGE.not()});
   });
-  var reflectanceField = p.faparMethod === 'NIRV' ? 'nir' : p.faparMethod === 'NDVI_RED_EXP' ? 'red' : null;
-  if (reflectanceField) forcingFC = forcingFC.map(function(f) {
-    var available = f.toDictionary([reflectanceField]).size().gt(0);
+  if (p.faparMethod === 'KNDVI' && !(typeof p.kndvi_sigma==='number' && isFinite(p.kndvi_sigma) && p.kndvi_sigma>0))
+    throw new Error('kNDVI sigma must be finite and positive.');
+  var bands = {NIRV:['nir'], NDVI_RED_EXP:['red'], KNDVI:['red','nir']}[p.faparMethod];
+  if (bands) forcingFC = forcingFC.map(function(f) {
+    var available = f.toDictionary(bands).size().eq(bands.length);
     return f.set('model_valid', ee.Algorithms.If(available, f.get('model_valid'), 0));
   });
   var missingForcing = forcingFC.filter(ee.Filter.eq('model_valid',0));
-  if (reflectanceField) forcingFC = forcingFC.filter(ee.Filter.notNull([reflectanceField]));
+  if (bands) forcingFC = forcingFC.filter(ee.Filter.notNull(bands));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if((p.faparMethod==='FGE' || p.faparMethod==='GE_NDVI_MIN' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET' && p.faparMethod !== 'NIRV' && p.faparMethod !== 'NDVI_RED_EXP' && p.faparMethod !== 'PROSAIL' && !rtAbsorptionMethod(p.faparMethod)) throw new Error('Unknown FAPAR method.');
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET' && p.faparMethod !== 'NIRV' && p.faparMethod !== 'NDVI_RED_EXP' && p.faparMethod !== 'PROSAIL' && p.faparMethod !== 'KNDVI' && !rtAbsorptionMethod(p.faparMethod)) throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -3139,6 +3149,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
         d.abs_fit_dates=params.abs_fit_dates;d.abs_fit_pixels=params.abs_fit_pixels;
       }
       if(absorptionObs)d.rt_fit_objective=cfg.rtObjective||'BRF';
+      if(params.faparMethod==='KNDVI') d.kndvi_sigma=params.kndvi_sigma;
       d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
       d.fge=params.fge_exp===0?1:(carbonFinite(d.GE)?Math.pow(Math.max(0,Math.min(1,d.GE/params.GE_scale)),params.fge_exp):null);
@@ -5020,6 +5031,7 @@ UI.runButton = ui.Button({
 });
 
 UI.faparSelector = ui.Select({items: [
+  {label: 'FAPAR = general kNDVI (RBF)', value: 'KNDVI'},
   {label: 'FAPAR = m_abs_ndvi × NDVI + b_abs_ndvi (PROSAIL chlorophyll fit)', value: 'RT_CHL_NDVI'},
   {label: 'FAPAR = m_abs_evi2 × EVI2 + b_abs_evi2 (PROSAIL chlorophyll fit)', value: 'RT_CHL_EVI2'},
   {label: 'FAPAR = PROSAIL chlorophyll absorption', value: 'RT_CHL'},
@@ -5041,6 +5053,9 @@ UI.faparSelector = ui.Select({items: [
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
+UI.kndviSigma=ui.Textbox({value:String(ACCLIM_PARAMS.kndvi_sigma)});
+UI.kndviPanel=ui.Panel([ui.Label('kNDVI sigma (fractional reflectance units)'),UI.kndviSigma]);
+UI.inputPanel.add(UI.kndviPanel);
 UI.reuseInputs=ui.Checkbox({label:'Reuse sampled weather and satellite inputs',value:true});
 UI.inputPanel.add(UI.reuseInputs);
 UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
@@ -5119,6 +5134,7 @@ UI.rtSkyPanel=ui.Panel([ui.Label('Assumed diffuse fraction of incident PAR photo
 UI.inputPanel.add(UI.rtSkyPanel);
 UI.inputPanel.add(ui.Button('PROSAIL retrieval diagnostics', rtApp));
 function updateRTOptions() {
+  UI.kndviPanel.style().set('shown',UI.faparSelector.getValue()==='KNDVI');
   var rtWater=['PROSAIL','RT_NDVI'].indexOf(UI.fiparSelector.getValue())>=0;
   if(rtWater)UI.sharedFPAR.setValue(false,false);
   UI.sharedFPAR.setDisabled(rtWater);
@@ -5691,6 +5707,10 @@ function onRun() {
 
   try {
     var manualParameters = readVegetationParameters();
+    if(UI.faparSelector.getValue()==='KNDVI'){
+      manualParameters.kndvi_sigma=Number(UI.kndviSigma.getValue());
+      if(!(isFinite(manualParameters.kndvi_sigma)&&manualParameters.kndvi_sigma>0))throw new Error('kNDVI sigma must be finite and positive.');
+    }
     if (carbonDateMillis(endDate) < carbonDateMillis(startDate))
       throw new Error('End date must be on or after start date.');
     UI._runWeatherPlan=null;
@@ -5715,7 +5735,7 @@ function onRun() {
       }
       try {
     var runDataConfig={rtObjective:UI.rtObjective.getValue(),rtDiffuse:UI.rtDiffuse.getValue().trim()===''?NaN:Number(UI.rtDiffuse.getValue()),rtBoxKm:Number(UI.rtBoxKm.getValue()),refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: rtAbsorptionMethod(UI.faparSelector.getValue()) ? UI.faparSelector.getValue() : UI.faparSelector.getValue() === 'PROSAIL' ? 'PROSAIL' : UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
+    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: (UI.faparSelector.getValue()==='KNDVI'||rtAbsorptionMethod(UI.faparSelector.getValue())) ? UI.faparSelector.getValue() : UI.faparSelector.getValue() === 'PROSAIL' ? 'PROSAIL' : UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
