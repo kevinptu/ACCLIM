@@ -5144,7 +5144,19 @@ UI.kndviTimePanel=ui.Panel([ui.Label('Temporal sigma reference start (YYYY-MM-DD
 UI.inputPanel.add(UI.kndviTimePanel);
 UI.reuseInputs=ui.Checkbox({label:'Reuse sampled weather and satellite inputs',value:true});
 UI.inputPanel.add(UI.reuseInputs);
-UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
+function collapsedInputSection(title, body) {
+  var expanded = false;
+  body.style().set('shown', false);
+  var toggle = ui.Button({label: '▶ ' + title, style: {stretch: 'horizontal'}});
+  toggle.onClick(function() {
+    expanded = !expanded;
+    body.style().set('shown', expanded);
+    toggle.setLabel((expanded ? '▼ ' : '▶ ') + title);
+  });
+  return ui.Panel([toggle, body]);
+}
+UI.vegetationPanel = ui.Panel();
+UI.inputPanel.add(collapsedInputSection('Vegetation parameters (applied on Run ACCLIM)', UI.vegetationPanel));
 UI.vegetationParameters = {};
 UI.soilMinimumSelectors = {};
 [
@@ -5161,18 +5173,18 @@ UI.soilMinimumSelectors = {};
   {key:'ndvi_min', label:'NDVImin'},
   {key:'ndvi_max', label:'NDVImax'}
 ].forEach(function(parameter) {
-  UI.inputPanel.add(ui.Label(parameter.label));
+  UI.vegetationPanel.add(ui.Label(parameter.label));
   var input = ui.Textbox({value:String(ACCLIM_PARAMS[parameter.key]), style:{stretch:'horizontal'}});
   UI.vegetationParameters[parameter.key] = input;
-  UI.inputPanel.add(input);
+  UI.vegetationPanel.add(input);
   if (parameter.key === 'EVI2min' || parameter.key === 'ndvi_min') {
     var auto = ui.Checkbox({label:'Auto: SoilGrids texture', value:false,
       onChange:function(selected) { input.setDisabled(selected); }});
     UI.soilMinimumSelectors[parameter.key] = auto;
-    UI.inputPanel.add(auto);
+    UI.vegetationPanel.add(auto);
   }
 });
-UI.inputPanel.add(ui.Label('Fitted/percentile methods estimate their bounds for each run. The fixed-maximum experiment uses EVI2max = 0.6.'));
+UI.vegetationPanel.add(ui.Label('Fitted/percentile methods estimate their bounds for each run. The fixed-maximum experiment uses EVI2max = 0.6.'));
 function readVegetationParameters() {
   var values = {};
   Object.keys(UI.vegetationParameters).forEach(function(key) {
@@ -5213,11 +5225,12 @@ UI.fiparSelector = ui.Select({
 UI.inputPanel.add(UI.fiparSelector);
 UI.rtBoxKm=ui.Textbox({value:'10',style:{stretch:'horizontal'}});
 UI.rtObjective=rtObjectiveSelector('BRF');
-UI.rtBoxPanel=ui.Panel([ui.Label('PROSAIL fitting objective'),UI.rtObjective,ui.Label('PROSAIL box side (km), Aqua MODIS 8-day'),UI.rtBoxKm]);
-UI.inputPanel.add(UI.rtBoxPanel);
 UI.rtDiffuse=ui.Textbox({value:'0.5'});
-UI.rtSkyPanel=ui.Panel([ui.Label('Assumed diffuse fraction of incident PAR photons (0–1)'),UI.rtDiffuse]);
-UI.inputPanel.add(UI.rtSkyPanel);
+UI.rtBoxPanel=collapsedInputSection('PROSAIL fitting objective', ui.Panel([
+  UI.rtObjective, ui.Label('PROSAIL box side (km), Aqua MODIS 8-day'), UI.rtBoxKm,
+  ui.Label('Assumed diffuse fraction of incident PAR photons (0–1)'), UI.rtDiffuse
+]));
+UI.inputPanel.add(UI.rtBoxPanel);
 UI.inputPanel.add(ui.Button('PROSAIL retrieval diagnostics', rtApp));
 function updateRTOptions() {
   UI.kndviTimePanel.style().set('shown',UI.faparSelector.getValue()==='KNDVI_TEMPORAL');
@@ -5227,7 +5240,6 @@ function updateRTOptions() {
   if(rtWater)UI.sharedFPAR.setValue(false,false);
   UI.sharedFPAR.setDisabled(rtWater);
   var absorption=rtAbsorptionMethod(UI.faparSelector.getValue());
-  UI.rtSkyPanel.style().set('shown',absorption||rtWater||UI.faparSelector.getValue()==='PROSAIL');
   UI.rtBoxPanel.style().set('shown',absorption||rtWater||UI.faparSelector.getValue()==='PROSAIL');
 }
 UI.fiparSelector.onChange(updateRTOptions);
