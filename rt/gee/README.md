@@ -107,3 +107,9 @@ Select **FAPAR = kNDVI (spatial mean |NIR − red| sigma)** and set the radius o
 Spatial mode applies the selected product's reflectance screening plus its land mask, or a permanent-water mask for Landsat composites. The output includes kNDVI, kndvi_radius_km and kndvi_sigma. Sigma in an aggregated or interpolated output row summarizes the contributing bandwidths; reconstructing the index from period-average reflectance and sigma can give a different result. An empty calibration region yields unavailable image kNDVI. Fixed sigma remains independently selectable.
 
 Reference: Wang et al. (2023), Estimation of vegetation traits with kernel NDVI, ISPRS Journal of Photogrammetry and Remote Sensing 195, 408–417, p. 410 (regional estimator 2).
+
+## kNDVI with temporal sigma
+
+Select **FAPAR = kNDVI (temporal sigma)** and enter the inclusive reference dates. The initial reference is calendar year 2012 for the Tonzi experiment. Choose dates with coverage by the selected satellite product. The reference stays fixed when the model dates change.
+
+Each pixel's sigma is the mean of |NIR − red| across valid, land-screened source observations in the reference interval. Each valid source observation has equal weight, including separate passes on the same day. A missing or zero bandwidth masks that pixel. The bandwidth is applied to each source image before spatial averaging, interpolation, and timestep aggregation, following the spatial method's observation pipeline. Model exports include kNDVI, kndvi_sigma and both reference dates. The reported regional sigma can vary with the sampled pixel footprint even though each pixel's reference bandwidth is fixed.
