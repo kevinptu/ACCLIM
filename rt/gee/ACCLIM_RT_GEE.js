@@ -724,11 +724,11 @@ function satelliteImages(geom,start,end,key,landOnly) {
   });
   return merged;
 }
-// IPL-UV demo 2: estimate sigma separately on every source image, then transform pixels.
+// Wang et al. (2023), p. 410: sigma = sum_i |NIR_i - red_i| / N for each image.
 function addSpatialKNDVI(img,region,scale) {
   var red=img.select('red'), nir=img.select('nir');
-  var brightness=nir.add(red).multiply(.5).rename('sigma');
-  var result=brightness.reduceRegion({reducer:ee.Reducer.median(),geometry:region,
+  var distance=nir.subtract(red).abs().rename('sigma');
+  var result=distance.reduceRegion({reducer:ee.Reducer.mean().unweighted(),geometry:region,
     crs:red.projection(),scale:scale,maxPixels:1e9,tileScale:4});
   var sigma=ee.Number(ee.Algorithms.If(result.get('sigma'),result.get('sigma'),0));
   var sigmaBand=red.multiply(0).add(sigma).rename('kndvi_sigma').updateMask(ee.Image.constant(sigma.gt(0)));
@@ -3249,7 +3249,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   }
   var inputKey=JSON.stringify(['ACCLIM-inputs-v1',geom.serialize(),start,end,first,last,
     cfg.weatherPlan?'tower':(cfg.weatherSource||'TERRACLIMATE'),cfg.satelliteSource||'MODIS16',cfg.timestep]);
-  if(sigmaRegion)inputKey+=':kndvi-spatial-v1:'+sigmaRadius;
+  if(sigmaRegion)inputKey+=':kndvi-spatial-wang-v2:'+sigmaRadius;
   var store=cfg.inputStore||sessionInputStore;
   var saved=cfg.refreshInputs?null:store.get(inputKey);
   var weatherRows=[],diagnosticRows=null;
@@ -5072,7 +5072,7 @@ UI.runButton = ui.Button({
 });
 
 UI.faparSelector = ui.Select({items: [
-  {label: 'FAPAR = kNDVI (spatial median sigma)', value: 'KNDVI_SPATIAL'},
+  {label: 'FAPAR = kNDVI (spatial mean |NIR − red| sigma)', value: 'KNDVI_SPATIAL'},
   {label: 'FAPAR = kNDVI (fixed sigma)', value: 'KNDVI'},
   {label: 'FAPAR = m_abs_ndvi × NDVI + b_abs_ndvi (PROSAIL chlorophyll fit)', value: 'RT_CHL_NDVI'},
   {label: 'FAPAR = m_abs_evi2 × EVI2 + b_abs_evi2 (PROSAIL chlorophyll fit)', value: 'RT_CHL_EVI2'},

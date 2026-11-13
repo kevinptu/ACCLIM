@@ -102,8 +102,8 @@ For index I, the per-pixel loss is (delta red)^2 + (delta NIR)^2 + (delta I / no
 
 ## kNDVI with spatial sigma
 
-Select **FAPAR = kNDVI (spatial median sigma)** and set the radius of the circular calibration region centered on the selected site or asset centroid (default 5 km). Following IPL-UV demo 2, each source image gets its own sigma, the regional median of (NIR + red)/2 in fractional reflectance units. Each valid pixel is transformed as tanh(((NIR - red)/(2 sigma))²) before averaging over the model geometry, aligning observation dates, and aggregating to the chosen timestep. FAPAR uses the aggregated index raised to fexp.
+Select **FAPAR = kNDVI (spatial mean |NIR − red| sigma)** and set the radius of the circular calibration region centered on the selected site or asset centroid (default 5 km). Following Wang et al. (2023), p. 410, each source image gets its own sigma, the arithmetic mean of the within-pixel absolute NIR minus red differences in fractional reflectance units. Each valid pixel is transformed as tanh(((NIR - red)/(2 sigma))²) before averaging over the model geometry, aligning observation dates, and aggregating to the chosen timestep. FAPAR uses the aggregated index raised to fexp.
 
 Spatial mode applies the selected product's reflectance screening plus its land mask, or a permanent-water mask for Landsat composites. The output includes kNDVI, kndvi_radius_km and kndvi_sigma. Sigma in an aggregated or interpolated output row summarizes the contributing bandwidths; reconstructing the index from period-average reflectance and sigma can give a different result. An empty calibration region yields unavailable image kNDVI. Fixed sigma remains independently selectable.
 
-Reference: https://code.earthengine.google.com/?scriptPath=users/ispguv/kNDVI:demos/demo2_kNDVI_spatial_sigma_estimation
+Reference: Wang et al. (2023), Estimation of vegetation traits with kernel NDVI, ISPRS Journal of Photogrammetry and Remote Sensing 195, 408–417, p. 410 (regional estimator 2).
