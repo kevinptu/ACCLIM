@@ -5127,7 +5127,7 @@ UI.faparSelector = ui.Select({items: [
   {label: 'FAPAR = FIPAR; NDVImin fitted at GE′ = 0', value: 'FIPAR_GE'},
   {label: 'FAPAR = EVI2 scaled to FIPAR', value: 'EVI2_FITTED'},
   {label: 'FAPAR = EVI2 FIPAR-fitted min; fixed max 0.6', value: 'EVI2_FITTED_MIN'},
-  {label: 'FAPAR = scaled EVI2 (fixed bounds, EVI2exp)', value: 'EVI2_FIXED_POWER'}], value: 'FIPAR',
+  {label: 'FAPAR = scaled EVI2 (fixed bounds, EVI2exp)', value: 'EVI2_FIXED_POWER'}], value: 'NDVI_BLEND',
   style: {stretch: 'horizontal', margin: '4px 0px'}});
 UI.inputPanel.add(ui.Label('FAPAR method (applied on Run ACCLIM)'));
 UI.inputPanel.add(UI.faparSelector);
@@ -5207,7 +5207,7 @@ UI.fiparSelector = ui.Select({
     {label: 'FIPAR = scaled NDVI', value: 'NDVI'},
     {label: 'FIPAR = w × NDVI^ndvi_exp + (1 − w) × fge', value: 'NDVI_BLEND'}
   ],
-  value: 'RT_NDVI',
+  value: 'PROSAIL',
   style: {stretch: 'horizontal'}
 });
 UI.inputPanel.add(UI.fiparSelector);

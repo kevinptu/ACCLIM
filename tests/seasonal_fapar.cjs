@@ -19,8 +19,8 @@ for(const file of ['gee/Acclim_v2_shapefile.js','../outputs/ACCLIM_GEE_web_app_s
  assert.equal(val(step(0,35,'2024-01-02').get('seasonal_ratio')),0);
  assert.equal(val(step(1e-15,35,'2024-01-02').get('seasonal_ratio')),1);
  assert(s.includes("value: 'FIPAR_GE'"));if(file.startsWith('gee/')){
-   assert(/\], value: 'FIPAR',\s*style:/.test(s));
-   assert(/\],\s*value: 'RT_NDVI',\s*style:/.test(s));
+   assert(/\], value: 'NDVI_BLEND',\s*style:/.test(s));
+   assert(/\],\s*value: 'PROSAIL',\s*style:/.test(s));
  }else assert(s.includes("value: 'EVI2_FIXED_POWER',\n  style:"));assert(s.includes('fitNDVIminGE: false'));
 }
 console.log('PASS hemisphere resets, leap/non-leap boundaries, containing-month reset, zero/tiny FAPAR and default/optional menu wiring');
