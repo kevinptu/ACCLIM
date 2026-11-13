@@ -662,7 +662,7 @@ function clearModisState(state) {
   return state.bitwiseAnd(3).eq(0).and(state.bitwiseAnd(4).eq(0))
     .and(state.bitwiseAnd(3<<8).eq(0)).and(state.bitwiseAnd((1<<10)|(1<<12)|(1<<13)|(1<<15)).eq(0));
 }
-function satelliteImages(geom,start,end,key) {
+function satelliteImages(geom,start,end,key,landOnly) {
   var spec=SATELLITE_SOURCES[key], merged=ee.ImageCollection([]);
   if (!spec) throw new Error('Unknown satellite source: '+key);
   spec.ids.forEach(function(id) {
@@ -706,6 +706,12 @@ function satelliteImages(geom,start,end,key) {
           }
         }
       }
+      if(landOnly){
+        if(spec.kind==='hls')mask=mask.and(fm.bitwiseAnd(32).eq(0));
+        else if(spec.kind==='vi')mask=mask.and(qa.rightShift(11).bitwiseAnd(7).eq(1));
+        else if(spec.kind!=='landsat')mask=mask.and(state.rightShift(3).bitwiseAnd(7).eq(1));
+        else mask=mask.and(ee.Image('JRC/GSW1_4/GlobalSurfaceWater').select('occurrence').unmask(0).lt(90));
+      }
       mask=mask.and(red.gte(0)).and(nir.gte(0)).and(red.lte(1)).and(nir.lte(1)).and(red.add(nir).gt(0));
       // Keep the RGB mask separate from model red/NIR; fit the GE baseline before the run.
       var ge=ee.Image.constant(0).rename('GE').updateMask(ee.Image.constant(0));
@@ -718,10 +724,23 @@ function satelliteImages(geom,start,end,key) {
   });
   return merged;
 }
-function sampleSatellite(geom,start,end,key,unpadded) {
+// IPL-UV demo 2: estimate sigma separately on every source image, then transform pixels.
+function addSpatialKNDVI(img,region,scale) {
+  var red=img.select('red'), nir=img.select('nir');
+  var brightness=nir.add(red).multiply(.5).rename('sigma');
+  var result=brightness.reduceRegion({reducer:ee.Reducer.median(),geometry:region,
+    crs:red.projection(),scale:scale,maxPixels:1e9,tileScale:4});
+  var sigma=ee.Number(ee.Algorithms.If(result.get('sigma'),result.get('sigma'),0));
+  var sigmaBand=red.multiply(0).add(sigma).rename('kndvi_sigma').updateMask(ee.Image.constant(sigma.gt(0)));
+  var index=nir.subtract(red).divide(sigmaBand.multiply(2)).pow(2).tanh().rename('kNDVI');
+  return img.addBands(index).addBands(sigmaBand);
+}
+function sampleSatellite(geom,start,end,key,unpadded,sigmaRegion) {
   var spec=SATELLITE_SOURCES[key], pad=spec.gap+32;
   var a=ee.Date(start).advance(unpadded?0:-pad,'day'), b=ee.Date(end).advance(unpadded?0:pad,'day');
-  var images=satelliteImages(geom,a,b.advance(1,'day'),key);
+  var images=satelliteImages(sigmaRegion?sigmaRegion.union(geom,1):geom,a,b.advance(1,'day'),key,!!sigmaRegion);
+  if(sigmaRegion)images=images.map(function(img){return addSpatialKNDVI(img,sigmaRegion,spec.scale);});
+  var sampleBands=sigmaRegion?['red','nir','GE','kNDVI','kndvi_sigma']:['red','nir','GE'];
   // Group pixels by their actual observation day BEFORE reducing spatially.
   // Same-day Terra/Aqua or HLS values are averaged with a common red/NIR mask.
   // Sample existing images only, rather than rebuilding every composite on every calendar day.
@@ -730,13 +749,14 @@ function sampleSatellite(geom,start,end,key,unpadded) {
     var count=spec.kind==='vi'?ee.Date.fromYMD(startDay.get('year').add(1),1,1).difference(startDay,'day').min(16):ee.Number(1);
     return ee.List.sequence(0,count.subtract(1)).map(function(i) {
       var d=startDay.advance(i,'day');
-      var pair=img.select(['red','nir','GE']).updateMask(img.select('observation_day').eq(d.millis().divide(86400000)));
+      var pair=img.select(sampleBands).updateMask(img.select('observation_day').eq(d.millis().divide(86400000)));
       var values=pair.reduceRegion({reducer:ee.Reducer.mean(),geometry:geom,scale:spec.scale,maxPixels:1e10,tileScale:4});
       return ee.Feature(null,values).set({date:d.format('YYYY-MM-dd'),millis:d.millis()});
     });
   }).flatten()).filter(ee.Filter.notNull(['red','nir']));
   var observed=sampled.distinct(['millis']).map(function(f) {
     var same=sampled.filter(ee.Filter.eq('millis',f.get('millis')));
+    if(sigmaRegion)f=f.set({kNDVI:same.aggregate_mean('kNDVI'),kndvi_sigma:same.aggregate_mean('kndvi_sigma')});
     return f.set({red:same.aggregate_mean('red'),nir:same.aggregate_mean('nir'),GE:same.aggregate_mean('GE'),GE_observation_count:same.filter(ee.Filter.notNull(['GE'])).size(),satellite_observation_count:same.size()});
   });
   return observed;
@@ -803,8 +823,10 @@ function assembleSelectedForcing(geom,start,end,config) {
     var props=ee.Dictionary({});
     // Unavailable satellite periods have null means; Dictionary.set rejects null.
     // Omit those properties so the existing completeness check flags the period.
-    ['red','nir','NDVI','EVI2','GE','GE_available_pct','satellite_missing_pct','satellite_unavailable_pct'].forEach(function(k){
-      var isReflectanceOrIndex = ['red','nir','NDVI','EVI2'].indexOf(k) >= 0;
+    var fields=['red','nir','NDVI','EVI2','GE','GE_available_pct','satellite_missing_pct','satellite_unavailable_pct'];
+    if(p.faparMethod==='KNDVI_SPATIAL')fields=fields.concat(['kNDVI','kndvi_sigma']);
+    fields.forEach(function(k){
+      var isReflectanceOrIndex = ['red','nir','NDVI','EVI2','kNDVI','kndvi_sigma'].indexOf(k) >= 0;
       var mean = monthly && isReflectanceOrIndex
         ? valid.reduceColumns(ee.Reducer.median(), [k]).get('median')
         : vi.aggregate_mean(k);
@@ -823,6 +845,10 @@ function assembleSelectedForcing(geom,start,end,config) {
       return astronomicalDaylength(lat,doyFromDate(ee.Date(t).advance(i,'day')));
     }).reduce(ee.Reducer.mean()));
     var complete=wf.toDictionary(['Tmin','Tmax','Tdaily','SWRdaily','ea','Pdaily']).size().eq(6).and(usableSatellite).and(dl.gt(0));
+    if(p.faparMethod==='KNDVI_SPATIAL'){
+      var kernelDays=vi.filter(ee.Filter.notNull(['kNDVI'])).size();
+      complete=complete.and(monthly?kernelDays.gt(0):kernelDays.eq(days));
+    }
     if(p.faparMethod==='RT_CHL'||p.faparMethod==='RT_LEAF') complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('FAPAR_leaf'),1,0)));
     if(p.faparMethod==='PROSAIL' || p.fiparMethod==='PROSAIL') complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('rt_fipar_daylight'),1,0)));
     if(p.fiparMethod==='NDVI_BLEND' && p.fge_exp>0)complete=complete.and(ee.Number(ee.Algorithms.If(props.contains('GE'),1,0)));
@@ -1160,6 +1186,7 @@ function computeFIPAR(ndvi, p, ge) {
 function photosyntheticFAPAR(instant, p) {
   // IPL-UV general RBF kNDVI: k=exp(-(NIR-red)^2/(2*sigma^2)); B=(1-k)/(1+k).
   // FAPAR = B^fexp. Inputs are the selected timestep's fractional reflectances.
+  if(p.faparMethod==='KNDVI_SPATIAL')return ee.Number(instant.get('kNDVI')).pow(p.fexp);
   if (p.faparMethod === 'KNDVI') {
     var distance = ee.Number(instant.get('nir')).subtract(instant.get('red')).divide(p.kndvi_sigma);
     var kernel = distance.pow(2).multiply(-0.5).exp();
@@ -1578,7 +1605,7 @@ function acclimStep(currentFeat, prevState, params) {
     RHmin_mean: RHmin_mean,
     RHmin_sm_mean: RHmin_sm_mean, VPDmax_sm_mean: VPDmax_sm_mean
   });
-  var instant = ee.Dictionary({FAPAR_leaf:f.get('FAPAR_leaf'),FAPAR_chl:f.get('FAPAR_chl'),rt_fipar_daylight:f.get('rt_fipar_daylight'), EVI2: EVI2, NDVI: NDVI, red:f.get('red'),nir:f.get('nir'),FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
+  var instant = ee.Dictionary({kNDVI:f.get('kNDVI'),FAPAR_leaf:f.get('FAPAR_leaf'),FAPAR_chl:f.get('FAPAR_chl'),rt_fipar_daylight:f.get('rt_fipar_daylight'), EVI2: EVI2, NDVI: NDVI, red:f.get('red'),nir:f.get('nir'),FIPAR: f.getNumber('FIPAR'),FIPAR_NDVI:p.useSharedFPAR?f.get('FIPAR_NDVI'):f.get('FIPAR'),GE:f.get('GE'),GE_normalized:f.get('GE_normalized')});
 
   var latitude=ee.Number(ee.Algorithms.If(f.propertyNames().contains('latitude'),f.get('latitude'),
     f.geometry().centroid(1).coordinates().get(1)));
@@ -2078,7 +2105,7 @@ function runACCLIM(forcingFC, params) {
   if (bands) forcingFC = forcingFC.filter(ee.Filter.notNull(bands));
   forcingFC = forcingFC.filter(ee.Filter.notNull(['Tmin','Tmax','SWRdaily','ea','NDVI','EVI2','Rnday']));
   if((p.faparMethod==='FGE' || p.faparMethod==='GE_NDVI_MIN' || p.faparMethod==='NDVI_BLEND' || p.fiparMethod==='NDVI_BLEND') && p.fge_exp>0)forcingFC=forcingFC.filter(ee.Filter.notNull(['GE']));
-  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET' && p.faparMethod !== 'NIRV' && p.faparMethod !== 'NDVI_RED_EXP' && p.faparMethod !== 'PROSAIL' && p.faparMethod !== 'KNDVI' && !rtAbsorptionMethod(p.faparMethod)) throw new Error('Unknown FAPAR method.');
+  if (p.faparMethod !== 'NDVI' && p.faparMethod !== 'EVI2' && p.faparMethod !== 'FIPAR' && p.faparMethod !== 'FGE' && p.faparMethod !== 'NDVI_BLEND' && p.faparMethod !== 'GE_NDVI_MIN' && p.faparMethod !== 'NDVI_GE_OFFSET' && p.faparMethod !== 'NIRV' && p.faparMethod !== 'NDVI_RED_EXP' && p.faparMethod !== 'PROSAIL' && p.faparMethod !== 'KNDVI' && p.faparMethod !== 'KNDVI_SPATIAL' && !rtAbsorptionMethod(p.faparMethod)) throw new Error('Unknown FAPAR method.');
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && !p.faparFit) p.faparFit = fitEVI2FAPAR(forcingFC, p);
   if (p.faparMethod === 'EVI2' && p.fitEVI2 && p.fitEVI2maxFixed) p.faparFit = fixedUpperEVI2Fit(p.faparFit);
   if (p.faparMethod === 'EVI2' && !p.fitEVI2 &&
@@ -3149,6 +3176,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
         d.abs_fit_dates=params.abs_fit_dates;d.abs_fit_pixels=params.abs_fit_pixels;
       }
       if(absorptionObs)d.rt_fit_objective=cfg.rtObjective||'BRF';
+      if(params.faparMethod==='KNDVI_SPATIAL')d.kndvi_radius_km=sigmaRadius;
       if(params.faparMethod==='KNDVI') d.kndvi_sigma=params.kndvi_sigma;
       d.FAPARmult=params.FAPARmult;
       d.GE_scale=params.GE_scale;d.ndvi_exp=params.ndvi_exp;d.ndvi_max_used=params.ndvi_max;d.EVI2min_parameter=params.EVI2min;d.EVI2max_parameter=params.EVI2max;
@@ -3214,8 +3242,14 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
   }
   var spec=SATELLITE_SOURCES[cfg.satelliteSource||'MODIS16'],pad=spec.gap+32;
   // Bump the version if sampling, QA, or GE aggregation semantics change.
+  var sigmaRegion=null, sigmaRadius=cfg.kndviRadiusKm===undefined?5:cfg.kndviRadiusKm;
+  if(params.faparMethod==='KNDVI_SPATIAL'){
+    if(!carbonFinite(sigmaRadius)||sigmaRadius<=0){done(null,'Enter a positive spatial sigma radius (km).');return;}
+    sigmaRegion=geom.centroid(1).buffer(sigmaRadius*1000,1);
+  }
   var inputKey=JSON.stringify(['ACCLIM-inputs-v1',geom.serialize(),start,end,first,last,
     cfg.weatherPlan?'tower':(cfg.weatherSource||'TERRACLIMATE'),cfg.satelliteSource||'MODIS16',cfg.timestep]);
+  if(sigmaRegion)inputKey+=':kndvi-spatial-v1:'+sigmaRadius;
   var store=cfg.inputStore||sessionInputStore;
   var saved=cfg.refreshInputs?null:store.get(inputKey);
   var weatherRows=[],diagnosticRows=null;
@@ -3248,7 +3282,7 @@ function runForGeometryAsync(geom,start,end,params,config,done) {
     }
     var next=Math.min(cursor+90*86400000,stop+86400000),a=carbonDateString(cursor),b=carbonDateString(next-86400000);
     setStatus('Sampling satellite reflectance: '+a+' to '+b+'...');
-    materialize(sampleSatellite(geom,a,b,cfg.satelliteSource||'MODIS16',true),function(rows) {
+    materialize(sampleSatellite(geom,a,b,cfg.satelliteSource||'MODIS16',true,sigmaRegion),function(rows) {
       sampled=sampled.concat(rows);cursor=next;satelliteBatch();
     });
   }
@@ -3501,11 +3535,14 @@ function carbonAllocation(context, p) {
 function alignSatelliteRows(observations,start,end,key) {
   var spec=SATELLITE_SOURCES[key],groups={};
   observations.forEach(function(r){var k=String(r.millis),n=r.satellite_observation_count||1;
-    if(!groups[k])groups[k]={millis:r.millis,red:0,nir:0,n:0,ge:0,geN:0};
+    if(!groups[k])groups[k]={millis:r.millis,red:0,nir:0,n:0,ge:0,geN:0,kSum:0,sigmaSum:0,kN:0};
     groups[k].red+=r.red*n;groups[k].nir+=r.nir*n;groups[k].n+=n;
+    if(carbonFinite(r.kNDVI)&&carbonFinite(r.kndvi_sigma)){
+      groups[k].kSum+=n*r.kNDVI;groups[k].sigmaSum+=n*r.kndvi_sigma;groups[k].kN+=n;
+    }
     if(carbonFinite(r.GE)){var gn=r.GE_observation_count||n;groups[k].ge+=r.GE*gn;groups[k].geN+=gn;}
   });
-  var obs=Object.keys(groups).map(function(k){var g=groups[k];return {millis:g.millis,red:g.red/g.n,nir:g.nir/g.n,GE:g.geN?g.ge/g.geN:null};})
+  var obs=Object.keys(groups).map(function(k){var g=groups[k];return {millis:g.millis,red:g.red/g.n,nir:g.nir/g.n,kNDVI:g.kN?g.kSum/g.kN:null,kndvi_sigma:g.kN?g.sigmaSum/g.kN:null,GE:g.geN?g.ge/g.geN:null};})
     .sort(function(a,b){return a.millis-b.millis;}),rows=[],j=0;
   for(var t=carbonDateMillis(start);t<=carbonDateMillis(end);t+=86400000) {
     while(j<obs.length && obs[j].millis<t)j++;
@@ -3518,6 +3555,10 @@ function alignSatelliteRows(observations,start,end,key) {
       satellite_left_date:valid?carbonDateString(l.millis):null,satellite_right_date:valid?carbonDateString(r.millis):null};
     if(valid) {
       var w=gap?(t-l.millis)/(r.millis-l.millis):0;
+      if(carbonFinite(l.kNDVI)&&carbonFinite(r.kNDVI)){
+        row.kNDVI=l.kNDVI+(r.kNDVI-l.kNDVI)*w;
+        row.kndvi_sigma=l.kndvi_sigma+(r.kndvi_sigma-l.kndvi_sigma)*w;
+      }
       row.red=l.red+(r.red-l.red)*w;row.nir=l.nir+(r.nir-l.nir)*w;
       if(carbonFinite(l.GE)&&carbonFinite(r.GE)){row.GE=l.GE+(r.GE-l.GE)*w;row.GE_available_pct=100;}
       row.NDVI=(row.nir-row.red)/(row.nir+row.red);
@@ -5031,7 +5072,8 @@ UI.runButton = ui.Button({
 });
 
 UI.faparSelector = ui.Select({items: [
-  {label: 'FAPAR = general kNDVI (RBF)', value: 'KNDVI'},
+  {label: 'FAPAR = kNDVI (spatial median sigma)', value: 'KNDVI_SPATIAL'},
+  {label: 'FAPAR = kNDVI (fixed sigma)', value: 'KNDVI'},
   {label: 'FAPAR = m_abs_ndvi × NDVI + b_abs_ndvi (PROSAIL chlorophyll fit)', value: 'RT_CHL_NDVI'},
   {label: 'FAPAR = m_abs_evi2 × EVI2 + b_abs_evi2 (PROSAIL chlorophyll fit)', value: 'RT_CHL_EVI2'},
   {label: 'FAPAR = PROSAIL chlorophyll absorption', value: 'RT_CHL'},
@@ -5056,6 +5098,9 @@ UI.inputPanel.add(UI.faparSelector);
 UI.kndviSigma=ui.Textbox({value:String(ACCLIM_PARAMS.kndvi_sigma)});
 UI.kndviPanel=ui.Panel([ui.Label('kNDVI sigma (fractional reflectance units)'),UI.kndviSigma]);
 UI.inputPanel.add(UI.kndviPanel);
+UI.kndviRadius=ui.Textbox({value:'5'});
+UI.kndviRegionPanel=ui.Panel([ui.Label('Spatial sigma radius around site center (km)'),UI.kndviRadius]);
+UI.inputPanel.add(UI.kndviRegionPanel);
 UI.reuseInputs=ui.Checkbox({label:'Reuse sampled weather and satellite inputs',value:true});
 UI.inputPanel.add(UI.reuseInputs);
 UI.inputPanel.add(ui.Label('Vegetation parameters (applied on Run ACCLIM)'));
@@ -5134,6 +5179,7 @@ UI.rtSkyPanel=ui.Panel([ui.Label('Assumed diffuse fraction of incident PAR photo
 UI.inputPanel.add(UI.rtSkyPanel);
 UI.inputPanel.add(ui.Button('PROSAIL retrieval diagnostics', rtApp));
 function updateRTOptions() {
+  UI.kndviRegionPanel.style().set('shown',UI.faparSelector.getValue()==='KNDVI_SPATIAL');
   UI.kndviPanel.style().set('shown',UI.faparSelector.getValue()==='KNDVI');
   var rtWater=['PROSAIL','RT_NDVI'].indexOf(UI.fiparSelector.getValue())>=0;
   if(rtWater)UI.sharedFPAR.setValue(false,false);
@@ -5734,8 +5780,8 @@ function onRun() {
         return;
       }
       try {
-    var runDataConfig={rtObjective:UI.rtObjective.getValue(),rtDiffuse:UI.rtDiffuse.getValue().trim()===''?NaN:Number(UI.rtDiffuse.getValue()),rtBoxKm:Number(UI.rtBoxKm.getValue()),refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
-    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: (UI.faparSelector.getValue()==='KNDVI'||rtAbsorptionMethod(UI.faparSelector.getValue())) ? UI.faparSelector.getValue() : UI.faparSelector.getValue() === 'PROSAIL' ? 'PROSAIL' : UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
+    var runDataConfig={kndviRadiusKm:Number(UI.kndviRadius.getValue()),rtObjective:UI.rtObjective.getValue(),rtDiffuse:UI.rtDiffuse.getValue().trim()===''?NaN:Number(UI.rtDiffuse.getValue()),rtBoxKm:Number(UI.rtBoxKm.getValue()),refreshInputs:!UI.reuseInputs.getValue(),timestep:UI.timestepSelector.getValue(),weatherPlan:UI._runWeatherPlan,weatherSource:UI.weatherSelector.getValue(),satelliteSource:UI.satelliteSelector.getValue()};
+    runForGeometryAsync(geom, startDate, endDate, mergeParams(manualParameters, {fiparMethod: UI.fiparSelector.getValue(), useSharedFPAR: UI.sharedFPAR.getValue(), fitVIMinP05: UI.faparSelector.getValue() === 'FIPAR_P05', fitNDVIminGE: UI.faparSelector.getValue() === 'FIPAR_GE' || UI.faparSelector.getValue() === 'NDVI_GE_OFFSET', faparMethod: (UI.faparSelector.getValue()==='KNDVI'||UI.faparSelector.getValue()==='KNDVI_SPATIAL'||rtAbsorptionMethod(UI.faparSelector.getValue())) ? UI.faparSelector.getValue() : UI.faparSelector.getValue() === 'PROSAIL' ? 'PROSAIL' : UI.faparSelector.getValue() === 'NIRV' ? 'NIRV' : UI.faparSelector.getValue() === 'NDVI_RED_EXP' ? 'NDVI_RED_EXP' : UI.faparSelector.getValue() === 'NDVI_GE_OFFSET' ? 'NDVI_GE_OFFSET' : UI.faparSelector.getValue() === 'GE_NDVI_MIN' ? 'GE_NDVI_MIN' : UI.faparSelector.getValue() === 'NDVI' ? 'NDVI' : UI.faparSelector.getValue() === 'NDVI_BLEND' ? 'NDVI_BLEND' : UI.faparSelector.getValue() === 'FGE' ? 'FGE' : (UI.faparSelector.getValue().indexOf('FIPAR') === 0 ? 'FIPAR' : 'EVI2'), fitEVI2: UI.faparSelector.getValue() === 'EVI2_FITTED' || UI.faparSelector.getValue() === 'EVI2_FITTED_MIN', powerFixedEVI2: UI.faparSelector.getValue() === 'EVI2_FIXED_POWER', fitEVI2maxFixed: UI.faparSelector.getValue() === 'EVI2_FITTED_MIN'}), runDataConfig, function(output,modelError) {
     if(runRequestId!==UI._requestId)return;
     if(modelError){UI.runButton.setDisabled(false);setStatus('Model error: '+modelError);return;}
     try {
